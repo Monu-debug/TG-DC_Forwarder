@@ -56,7 +56,6 @@ async def cache_telegram_dialogs():
         logger.info("Caching Telegram channels for autocomplete...")
         channels = []
         async for dialog in tg_client.iter_dialogs():
-            # Cache channels, megagroups, and standard chats
             if dialog.is_channel or dialog.is_group:
                 entity = dialog.entity
                 title = getattr(entity, 'title', 'Unknown Title')
@@ -80,8 +79,15 @@ async def on_ready():
     
     try:
         logger.info("Synchronizing slash commands globally...")
-        synced = await discord_bot.tree.sync()
-        logger.info(f"Successfully synchronized {len(synced)} slash command(s).")
+        # Sync globally (can take up to 1 hour to propagate)
+        await discord_bot.tree.sync()
+        
+        # Sync to all active guilds the bot is currently in (immediate update)
+        for guild in discord_bot.guilds:
+            await discord_bot.tree.sync(guild=guild)
+            logger.info(f"Instantly synchronized commands to server: '{guild.name}' ({guild.id})")
+            
+        logger.info("Slash command sync completed.")
     except Exception as e:
         logger.error(f"Failed to synchronize slash commands: {e}")
 
@@ -339,7 +345,7 @@ async def add_telegram_autocomplete(
         
         # Search match by title, username, or ID
         if search in title.lower() or (username and search in username.lower()) or search in ch_id:
-            # Construct a human-readable name limit of 100 chars
+            # Construct a name limit of 100 chars
             display_name = f"{title} (@{username})" if username else title
             if len(display_name) > 100:
                 display_name = display_name[:97] + "..."

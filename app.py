@@ -435,8 +435,15 @@ async def on_ready():
     manager.log(f"Discord Command Bot connected as {discord_bot.user}")
     try:
         manager.log("Synchronizing slash commands globally...")
-        synced = await discord_bot.tree.sync()
-        manager.log(f"Successfully synchronized {len(synced)} slash command(s).")
+        # Sync globally
+        await discord_bot.tree.sync()
+        
+        # Sync to all active guilds the bot is currently in (immediate update)
+        for guild in discord_bot.guilds:
+            await discord_bot.tree.sync(guild=guild)
+            manager.log(f"Instantly synchronized commands to server: '{guild.name}' ({guild.id})")
+            
+        manager.log("Slash command sync completed.")
     except Exception as e:
         manager.log(f"Failed to synchronize slash commands: {e}", logging.ERROR)
 
