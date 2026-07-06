@@ -367,6 +367,14 @@ def get_bot_manager():
 # Retrieve manager instance
 manager = get_bot_manager()
 
+# Auto-start bot on page load if session already exists (ensures 24/7 boot on container restarts)
+if manager.status == "Stopped":
+    session_exists = os.path.exists("telegram_forwarder_session.session")
+    has_config = os.path.exists("config.yaml") or (len(st.secrets) > 0 and "telegram" in st.secrets)
+    if session_exists and has_config:
+        manager.start_bot()
+
+
 # --- DISCORD COMMAND BOT IMPLEMENTATION ---
 intents = discord.Intents.default()
 intents.message_content = True
