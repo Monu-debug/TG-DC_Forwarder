@@ -375,6 +375,37 @@ def build_list_embed():
         )
     return embed
 
+async def get_or_create_webhook(channel: discord.TextChannel) -> str:
+    # Check permissions
+    permissions = channel.permissions_for(channel.guild.me)
+    if not permissions.manage_webhooks:
+        raise PermissionError(
+            "Bot lacks 'Manage Webhooks' permission in that channel. "
+            "Please grant this permission to the bot or manually create a webhook and provide the Webhook URL."
+        )
+        
+    webhooks = await channel.webhooks()
+    for wh in webhooks:
+        if wh.user == discord_bot.user:
+            return wh.url
+            
+    # Create new webhook if not found
+    new_wh = await channel.create_webhook(name="Telegram Forwarder Link")
+    return new_wh.url
+
+async def resolve_discord_channel(guild: discord.Guild, input_str: str) -> discord.TextChannel:
+    clean_id = input_str.strip("<#> ")
+    if clean_id.isdigit():
+        channel = guild.get_channel(int(clean_id))
+        if isinstance(channel, discord.TextChannel):
+            return channel
+            
+    channel = discord.utils.get(guild.text_channels, name=input_str.lstrip('#'))
+    if channel:
+        return channel
+        
+    raise ValueError(f"Could not find a text channel named or matching '{input_str}' in this server.")
+
 @discord_bot.event
 async def on_ready():
     manager.log(f"Discord Command Bot connected as {discord_bot.user}")
@@ -403,12 +434,19 @@ async def cmd_list(ctx):
     await ctx.send(embed=embed)
 
 @discord_bot.command(name="add")
-async def cmd_add(ctx, telegram_channel: str, webhook_url: str):
-    """Maps a new Telegram channel. Usage: !add <id> <url>"""
-    if not webhook_url.startswith("https://discord.com/api/webhooks/"):
-        await ctx.send("❌ Error: Webhook URL must start with `https://discord.com/api/webhooks/`")
-        return
-        
+async def cmd_add(ctx, telegram_channel: str, discord_target: str):
+    """Maps a new Telegram channel. Usage: !add <id> <channel_or_webhook>"""
+    webhook_url = None
+    if discord_target.startswith("https://discord.com/api/webhooks/"):
+        webhook_url = discord_target
+    else:
+        try:
+            channel = await resolve_discord_channel(ctx.guild, discord_target)
+            webhook_url = await get_or_create_webhook(channel)
+        except Exception as e:
+            await ctx.send(f"❌ Error: {e}")
+            return
+            
     await ctx.send(f"⏳ Attempting to subscribe to Telegram channel `{telegram_channel}`...")
     
     resolved = telegram_channel
@@ -487,18 +525,26 @@ async def slash_list(interaction: discord.Interaction):
         return
     await interaction.response.send_message(embed=embed)
 
-@discord_bot.tree.command(name="add", description="Maps a new Telegram channel to a Discord Webhook")
+@discord_bot.tree.command(name="add", description="Maps a new Telegram channel to a Discord Channel or Webhook")
 @app_commands.describe(
     telegram_channel="Telegram channel username (e.g. durov) or numeric ID (e.g. -100...)",
-    webhook_url="Discord Webhook URL where messages should be forwarded"
+    discord_target="Discord channel name, ID, mention, or a raw Webhook URL"
 )
-async def slash_add(interaction: discord.Interaction, telegram_channel: str, webhook_url: str):
-    if not webhook_url.startswith("https://discord.com/api/webhooks/"):
-        await interaction.response.send_message("❌ Error: Webhook URL must start with `https://discord.com/api/webhooks/`", ephemeral=True)
-        return
-        
+async def slash_add(interaction: discord.Interaction, telegram_channel: str, discord_target: str):
     await interaction.response.defer(ephemeral=False)
     
+    webhook_url = None
+    if discord_target.startswith("https://discord.com/api/webhooks/"):
+        webhook_url = discord_target
+    else:
+        try:
+            # Resolve inside guild context
+            channel = await resolve_discord_channel(interaction.guild, discord_target)
+            webhook_url = await get_or_create_webhook(channel)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {e}")
+            return
+            
     resolved = telegram_channel
     if telegram_channel.startswith('-') or telegram_channel.isdigit():
         try:
@@ -507,6 +553,7 @@ async def slash_add(interaction: discord.Interaction, telegram_channel: str, web
             pass
             
     try:
+        # Run Telethon calls threadsafe
         future = asyncio.run_coroutine_threadsafe(manager.client.get_entity(resolved), manager.loop)
         entity = await asyncio.wrap_future(future)
         
@@ -561,7 +608,7 @@ async def slash_remove(interaction: discord.Interaction, telegram_channel: str):
         await asyncio.wrap_future(future_listeners)
         await interaction.followup.send(f"✅ Successfully removed forwarding mapping for **{title}** (`{matched_id}`).")
     else:
-        await interaction.followup.send(f"❌ Error: Failed to remove mapping. Config-defined channels must be removed directly inside settings.")
+        await interaction.followup.send(f"❌ Error: Failed to remove mapping. Mappings defined in settings/secrets must be removed there directly.")
 
 # --- WEB APP INTERFACE ---
 
