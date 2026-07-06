@@ -88,7 +88,7 @@ class BotManager:
         self.code_submitted = None
         self.password_submitted = None
         
-        self.channel_to_webhook = {}
+        self.channel_to_webhook = {} # Maps entity.id -> (entity, list of webhook_keys)
         self.active_telegram_handler = None
         self.discord_task = None
         self.cached_telegram_channels = []
@@ -276,7 +276,12 @@ class BotManager:
                     channel_name = int(channel_name)
                 
                 entity = await self.client.get_entity(channel_name)
-                self.channel_to_webhook[entity.id] = (entity, webhook_key)
+                if entity.id in self.channel_to_webhook:
+                    _, keys = self.channel_to_webhook[entity.id]
+                    if webhook_key not in keys:
+                        keys.append(webhook_key)
+                else:
+                    self.channel_to_webhook[entity.id] = (entity, [webhook_key])
                 self.log(f"Subscribed Channel: '{entity.title}' ({entity.id}) -> Webhook Key: '{webhook_key}'")
             except Exception as e:
                 self.log(f"Failed to resolve Telegram channel '{channel_name}': {e}", logging.ERROR)
@@ -320,9 +325,10 @@ class BotManager:
             if not mapped_item:
                 return
             
-            entity, webhook_key = mapped_item
-            self.log(f"Detected new message in '{entity.title}'. Forwarding...")
-            await self.forwarder.forward_message(self.client, entity, event.message, webhook_key)
+            entity, webhook_keys = mapped_item
+            self.log(f"Detected new message in '{entity.title}'. Forwarding to {len(webhook_keys)} webhooks...")
+            for key in webhook_keys:
+                await self.forwarder.forward_message(self.client, entity, event.message, key)
 
         self.client.add_event_handler(handler, events.NewMessage(chats=channel_ids))
         self.active_telegram_handler = handler
@@ -398,13 +404,12 @@ def build_list_embed():
     if not manager.channel_to_webhook:
         return None
     embed = discord.Embed(title="📋 Active Channel Mappings", color=discord.Color.blue())
-    for ch_id, (entity, webhook_key) in manager.channel_to_webhook.items():
+    for ch_id, (entity, webhook_keys) in manager.channel_to_webhook.items():
         title = getattr(entity, 'title', f"ID: {ch_id}")
-        webhook_url = manager.forwarder.webhooks.get(webhook_key, "Unknown URL")
-        masked_url = webhook_url[:45] + "..." if len(webhook_url) > 45 else webhook_url
+        keys_str = ", ".join([f"`{k}`" for k in webhook_keys])
         embed.add_field(
             name=f"📢 {title}",
-            value=f"• **Telegram ID:** `{ch_id}`\n• **Webhook Key:** `{webhook_key}`\n• **Webhook URL:** `{masked_url}`",
+            value=f"• **Telegram ID:** `{ch_id}`\n• **Webhook Keys:** {keys_str}",
             inline=False
         )
     return embed
@@ -500,8 +505,14 @@ async def cmd_add(ctx, telegram_channel: str, discord_target: str):
         entity = await asyncio.wrap_future(future)
         
         webhook_key = manager.forwarder.add_mapping(entity.id, webhook_url)
-        manager.channel_to_webhook[entity.id] = (entity, webhook_key)
         
+        if entity.id in manager.channel_to_webhook:
+            _, keys = manager.channel_to_webhook[entity.id]
+            if webhook_key not in keys:
+                keys.append(webhook_key)
+        else:
+            manager.channel_to_webhook[entity.id] = (entity, [webhook_key])
+            
         future_listeners = asyncio.run_coroutine_threadsafe(manager.update_tg_listeners(), manager.loop)
         await asyncio.wrap_future(future_listeners)
         
@@ -590,8 +601,14 @@ async def slash_add(interaction: discord.Interaction, telegram_channel: str, dis
         entity = await asyncio.wrap_future(future)
         
         webhook_key = manager.forwarder.add_mapping(entity.id, webhook_url)
-        manager.channel_to_webhook[entity.id] = (entity, webhook_key)
         
+        if entity.id in manager.channel_to_webhook:
+            _, keys = manager.channel_to_webhook[entity.id]
+            if webhook_key not in keys:
+                keys.append(webhook_key)
+        else:
+            manager.channel_to_webhook[entity.id] = (entity, [webhook_key])
+            
         future_listeners = asyncio.run_coroutine_threadsafe(manager.update_tg_listeners(), manager.loop)
         await asyncio.wrap_future(future_listeners)
         
@@ -771,9 +788,10 @@ with col1:
             st.write("**Discord Bot:**", "Configured ✅" if config.get("discord", {}).get("bot_token") else "Not Configured ❌")
             
             st.write(f"**Active Subscriptions ({len(manager.channel_to_webhook)}):**")
-            for ch_id, (entity, webhook_key) in manager.channel_to_webhook.items():
+            for ch_id, (entity, webhook_keys) in manager.channel_to_webhook.items():
                 title = getattr(entity, 'title', f"ID: {ch_id}")
-                st.markdown(f"- **{title}** (`{ch_id}`) ➡️ `{webhook_key}`")
+                keys_str = ", ".join(webhook_keys)
+                st.markdown(f"- **{title}** (`{ch_id}`) ➡️ `{keys_str}`")
         except Exception as e:
             st.error(f"Error loading settings view: {e}")
     else:

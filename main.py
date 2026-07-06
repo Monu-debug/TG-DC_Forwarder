@@ -24,7 +24,7 @@ logger = logging.getLogger("telegram_discord_forwarder")
 # Global reference objects
 tg_client = None
 forwarder_instance = None
-channel_to_webhook = {}
+channel_to_webhook = {} # Maps entity.id -> (entity, list of webhook_keys)
 active_telegram_handler = None
 cached_telegram_channels = [] # Stores dicts: {"title": str, "id": str, "username": str}
 
@@ -79,7 +79,6 @@ async def on_ready():
     
     try:
         logger.info("Synchronizing slash commands globally...")
-        # Sync globally (can take up to 1 hour to propagate)
         await discord_bot.tree.sync()
         
         # Sync to all active guilds the bot is currently in (immediate update)
@@ -113,13 +112,12 @@ def build_list_embed():
         return None
         
     embed = discord.Embed(title="📋 Active Channel Mappings", color=discord.Color.blue())
-    for ch_id, (entity, webhook_key) in channel_to_webhook.items():
+    for ch_id, (entity, webhook_keys) in channel_to_webhook.items():
         title = getattr(entity, 'title', f"ID: {ch_id}")
-        webhook_url = forwarder_instance.webhooks.get(webhook_key, "Unknown URL")
-        masked_url = webhook_url[:45] + "..." if len(webhook_url) > 45 else webhook_url
+        keys_str = ", ".join([f"`{k}`" for k in webhook_keys])
         embed.add_field(
             name=f"📢 {title}",
-            value=f"• **Telegram ID:** `{ch_id}`\n• **Webhook Key:** `{webhook_key}`\n• **Webhook URL:** `{masked_url}`",
+            value=f"• **Telegram ID:** `{ch_id}`\n• **Webhook Keys:** {keys_str}",
             inline=False
         )
     return embed
@@ -198,7 +196,15 @@ async def cmd_add(ctx, telegram_channel: str, discord_target: str):
     try:
         entity = await tg_client.get_entity(resolved)
         webhook_key = forwarder_instance.add_mapping(entity.id, webhook_url)
-        channel_to_webhook[entity.id] = (entity, webhook_key)
+        
+        # Add to memory map (supporting multiple webhooks per channel)
+        if entity.id in channel_to_webhook:
+            _, keys = channel_to_webhook[entity.id]
+            if webhook_key not in keys:
+                keys.append(webhook_key)
+        else:
+            channel_to_webhook[entity.id] = (entity, [webhook_key])
+            
         await update_tg_listeners()
         
         embed = discord.Embed(title="✅ Mapping Added Successfully", color=discord.Color.green())
@@ -239,7 +245,7 @@ async def cmd_remove(ctx, telegram_channel: str):
     if success:
         channel_to_webhook.pop(matched_id, None)
         await update_tg_listeners()
-        await ctx.send(f"✅ Successfully removed forwarding mapping for **{title}** (`{matched_id}`).")
+        await ctx.send(f"✅ Successfully removed forwarding forwarding for **{title}** (`{matched_id}`).")
     else:
         await ctx.send(f"❌ Error: Failed to remove mapping. Config-defined channels must be removed directly inside settings.")
 
@@ -267,7 +273,6 @@ async def slash_add(interaction: discord.Interaction, telegram_channel: str, dis
     await interaction.response.defer(ephemeral=False)
     
     try:
-        # Automatically get or create a webhook on the selected channel
         webhook_url = await get_or_create_webhook(discord_channel)
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {e}")
@@ -283,7 +288,15 @@ async def slash_add(interaction: discord.Interaction, telegram_channel: str, dis
     try:
         entity = await tg_client.get_entity(resolved)
         webhook_key = forwarder_instance.add_mapping(entity.id, webhook_url)
-        channel_to_webhook[entity.id] = (entity, webhook_key)
+        
+        # Add to memory map (supporting multiple webhooks per channel)
+        if entity.id in channel_to_webhook:
+            _, keys = channel_to_webhook[entity.id]
+            if webhook_key not in keys:
+                keys.append(webhook_key)
+        else:
+            channel_to_webhook[entity.id] = (entity, [webhook_key])
+            
         await update_tg_listeners()
         
         embed = discord.Embed(title="✅ Mapping Added Successfully", color=discord.Color.green())
@@ -291,7 +304,7 @@ async def slash_add(interaction: discord.Interaction, telegram_channel: str, dis
         embed.add_field(name="Discord Channel", value=discord_channel.mention, inline=True)
         await interaction.followup.send(embed=embed)
         
-        # Trigger an update of dialogs cache in case they joined a new channel
+        # Trigger an update of dialogs cache
         asyncio.create_task(cache_telegram_dialogs())
     except Exception as e:
         logger.error(f"Failed to add mapping via slash command: {e}")
@@ -333,7 +346,6 @@ async def add_telegram_autocomplete(
     interaction: discord.Interaction,
     current: str
 ) -> List[app_commands.Choice[str]]:
-    """Autocompletes Telegram channels from cached dialogs."""
     choices = []
     search = current.lower()
     count = 0
@@ -343,16 +355,14 @@ async def add_telegram_autocomplete(
         username = ch["username"]
         ch_id = ch["id"]
         
-        # Search match by title, username, or ID
         if search in title.lower() or (username and search in username.lower()) or search in ch_id:
-            # Construct a name limit of 100 chars
             display_name = f"{title} (@{username})" if username else title
             if len(display_name) > 100:
                 display_name = display_name[:97] + "..."
                 
             choices.append(app_commands.Choice(name=display_name, value=ch_id))
             count += 1
-            if count >= 25: # Discord restriction
+            if count >= 25:
                 break
     return choices
 
@@ -361,7 +371,6 @@ async def remove_telegram_autocomplete(
     interaction: discord.Interaction,
     current: str
 ) -> List[app_commands.Choice[str]]:
-    """Autocompletes active Telegram channels from currently mapped list."""
     choices = []
     search = current.lower()
     count = 0
@@ -408,9 +417,10 @@ async def update_tg_listeners():
         if not mapped_item:
             return
             
-        entity, webhook_key = mapped_item
-        logger.info(f"New message in '{entity.title}' ({chat_id}). Forwarding...")
-        await forwarder_instance.forward_message(tg_client, entity, event.message, webhook_key)
+        entity, webhook_keys = mapped_item
+        logger.info(f"New message in '{entity.title}' ({chat_id}). Forwarding to {len(webhook_keys)} webhooks...")
+        for key in webhook_keys:
+            await forwarder_instance.forward_message(tg_client, entity, event.message, key)
 
     tg_client.add_event_handler(handler, events.NewMessage(chats=channel_ids))
     active_telegram_handler = handler
@@ -451,7 +461,15 @@ async def main():
             if isinstance(channel_name, str) and (channel_name.startswith('-') or channel_name.isdigit()):
                 channel_name = int(channel_name)
             entity = await tg_client.get_entity(channel_name)
-            channel_to_webhook[entity.id] = (entity, webhook_key)
+            
+            # Support multiple webhooks mapped to the same channel on boot
+            if entity.id in channel_to_webhook:
+                _, keys = channel_to_webhook[entity.id]
+                if webhook_key not in keys:
+                    keys.append(webhook_key)
+            else:
+                channel_to_webhook[entity.id] = (entity, [webhook_key])
+                
             logger.info(f"Mapped Channel: '{entity.title}' ({entity.id}) -> Webhook: '{webhook_key}'")
         except Exception as e:
             logger.error(f"Failed to resolve channel '{channel_name}': {e}")
