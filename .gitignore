@@ -1,0 +1,18 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Project specific ignores
+*.session
+*.session-journal
+*.log
+temp/
+avatar_cache.json
+config.yaml
