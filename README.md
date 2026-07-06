@@ -1,8 +1,10 @@
-# Telegram to Discord Message Forwarder
+# Telegram to Discord Message Forwarder (Integrated Webhook & Bot Version)
 
-This script forwards messages from multiple Telegram channels to specified Discord channels using a Telegram User Session (via Telethon) and Discord Webhooks.
+This script forwards messages from multiple Telegram channels to specified Discord channels. 
 
-It features **dynamic branding**—the script automatically sets the webhook's username and avatar to match the source Telegram channel, making the forwarded messages look native. It also supports forwarding media attachments (images, video, documents).
+It uses **both a Discord Webhook and a Discord Command Bot** in parallel:
+1. **Discord Webhooks** forward messages. This retains **dynamic branding**—the messages appear in Discord with the actual Telegram channel's name and profile photo.
+2. **Discord Bot** listens for commands directly inside Discord (like `!add`, `!remove`, `!list`, `!status`), allowing you to manage mappings dynamically without restarting or editing config files.
 
 ---
 
@@ -10,7 +12,7 @@ It features **dynamic branding**—the script automatically sets the webhook's u
 
 - **Python 3.8+** (your current system has Python 3.14.6)
 - A Telegram account
-- A Discord server where you have permission to manage webhooks
+- A Discord server where you have permission to manage webhooks and invite bots.
 
 ---
 
@@ -34,75 +36,89 @@ python -m pip install -r requirements.txt
 ```
 
 ### 3. Retrieve Telegram API Credentials
-To connect to Telegram, you need to register a developer application:
 1. Log in to your Telegram account at [my.telegram.org](https://my.telegram.org).
 2. Go to **API development tools**.
-3. Create a new application (you can fill in any title and short name).
-4. Note your **App api_id** and **App api_hash**.
+3. Create a new application and note your **App api_id** and **App api_hash**.
 
-### 4. Create a Discord Webhook
+### 4. Create your Discord Webhook (For forwarding)
 1. In your Discord server, right-click a text channel and select **Edit Channel**.
-2. Go to **Integrations** > **Webhooks** > **Create Webhook** (or **New Webhook**).
-3. Copy the **Webhook URL**.
+2. Go to **Integrations** > **Webhooks** > **Create Webhook** and copy the **Webhook URL**.
 
-### 5. Configure the Application
-Open `config.yaml` and update it with your credentials and channel mappings:
+### 5. Create your Discord Bot (For managing mappings)
+1. Go to the [Discord Developer Portal](https://discord.com/developers/applications).
+2. Click **New Application**, name it, and click **Create**.
+3. Go to the **Bot** tab on the left. Click **Reset Token** (or **Copy Token**) and save your **Bot Token**.
+4. Scroll down to **Privileged Gateway Intents** and enable **Message Content Intent** (click **Save Changes**).
+5. Go to **OAuth2** tab > **URL Generator**:
+   - Select scope: `bot`
+   - Select bot permissions: `Send Messages`, `Embed Links`, `Attach Files`
+6. Copy the URL at the bottom, open it in your browser, and invite the bot to your Discord server.
+
+### 6. Configure the Application
+Open `config.yaml` and update it with your credentials:
 
 ```yaml
 telegram:
-  api_id: 1234567               # Change to your API ID (must be an integer, no quotes)
-  api_hash: "your_api_hash"     # Change to your API Hash (keep inside quotes)
-  phone: "+1234567890"          # Change to your phone number with country code
+  api_id: 1234567               # Change to your Telegram API ID
+  api_hash: "your_api_hash"     # Change to your Telegram API Hash
+  phone: "+1234567890"          # Change to your phone number
+
+discord:
+  bot_token: "YOUR_DISCORD_BOT_TOKEN_HERE" # Put your Discord Bot Token here
 
 discord_webhooks:
   default: "https://discord.com/api/webhooks/YOUR_WEBHOOK_URL_HERE"
-  # You can add more webhooks here with different keys (e.g. general, news, etc.)
-
-mappings:
-  - telegram_channel: "telegram" # Public username (without '@') or private channel numeric ID
-    webhook_key: "default"       # Maps to 'default' webhook above
 ```
-
-#### Finding Private Channel IDs:
-If you want to forward from a private channel:
-1. Ensure your Telegram account is joined to the channel.
-2. In Telegram Web or using a client, share or forward a message from the private channel, or use a bot like `@raw_infobot` to find the channel ID.
-3. Private channel IDs in Telethon typically look like integers starting with `-100` (e.g., `-1001593847291`). Add this numeric ID directly in the config mappings.
 
 ---
 
-## Running the Forwarder
+## Discord Chat Commands
 
-Run the script using:
+Your Discord Bot listens for the following commands in any text channel it has access to:
 
-```bash
-python main.py
-```
+* **`!status`**: Displays connection health for Telegram and Discord, and tells you how many channels are active.
+* **`!list`**: Lists all active Telegram channels being forwarded and their target webhook paths.
+* **`!add <telegram_channel_username_or_id> <discord_webhook_url>`**: Dynamically maps and subscribes to a new Telegram channel.
+  * *Example:* `!add -1003827118873 https://discord.com/api/webhooks/...`
+  * *Example:* `!add durov https://discord.com/api/webhooks/...`
+* **`!remove <telegram_channel_username_or_id_or_title>`**: Dynamically unsubscribes and removes a mapping.
+  * *Example:* `!remove -1003827118873` or `!remove durov`
 
-### First-Run Authentication
-On the first run, the script will prompt you in the console to complete the login:
-1. **Phone Number**: Confirm or enter the phone number associated with your Telegram account (including country code).
-2. **Verification Code**: Enter the code sent to your Telegram app (not SMS).
-3. **Two-Factor Authentication (Optional)**: If you have 2FA enabled, enter your password.
-
-Once authenticated, a session file named `telegram_forwarder_session.session` is created. **Do not share this file** as it contains active login tokens. Subsequent runs will use this session file and log in automatically without prompts.
+*Note: Dynamic mappings added or removed via Discord chat commands are automatically persisted to a local `dynamic_mappings.json` file.*
 
 ---
 
-## Running in the Background (Production)
+## Hosting on Streamlit Cloud (24/7 Free Hosting)
 
-To keep the script running permanently:
+1. Push your repository to GitHub (ensure it is **Private**).
+2. Go to [share.streamlit.io](https://share.streamlit.io) and deploy your app selecting the `main` branch and setting the main file path to `app.py`.
+3. In your Streamlit App settings, go to the **Secrets** tab and paste your configuration in TOML format:
 
-### On Windows (Task Scheduler or Background Script)
-You can run it in a hidden window using a simple VBS script or run it as a background task. 
+```toml
+# Telegram API Credentials
+[telegram]
+api_id = 20861184
+api_hash = "90455d0cdedfe6bb16bd716e2438703b"
+phone = "+917499224791"
 
-Alternative using PowerShell:
-```powershell
-Start-Process -FilePath "python" -ArgumentList "main.py" -WindowStyle Hidden
+# Discord Bot Token (For commands)
+[discord]
+bot_token = "YOUR_DISCORD_BOT_TOKEN_HERE"
+
+# Discord Webhook Configurations (For forwarding)
+[discord_webhooks]
+default = "https://discord.com/api/webhooks/YOUR_WEBHOOK_URL_HERE"
+
+# Base mappings
+[[mappings]]
+telegram_channel = "-1003827118873"
+webhook_key = "default"
+
+# General Settings
+[settings]
+forward_media = true
+download_max_size_mb = 25
+temp_dir = "./temp"
+use_telegram_profile = true
 ```
-
-### On Linux (systemd / pm2)
-You can easily wrap it in a systemd service or PM2 process manager:
-```bash
-pm2 start main.py --name "tg-discord-forwarder" --interpreter python3
-```
+4. Save the secrets and click **Start Bot** in your Streamlit dashboard. Authenticate your Telegram session on-screen during the first run.

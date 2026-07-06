@@ -5,6 +5,9 @@ import asyncio
 import logging
 from telethon import TelegramClient, events
 from forwarder import DiscordForwarder
+import discord
+from discord.ext import commands
+from discord import app_commands
 
 # Configure Logging
 logging.basicConfig(
@@ -16,6 +19,12 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("telegram_discord_forwarder")
+
+# Global reference objects
+tg_client = None
+forwarder_instance = None
+channel_to_webhook = {}
+active_telegram_handler = None
 
 def load_config() -> dict:
     config_path = "config.yaml"
@@ -30,94 +39,314 @@ def load_config() -> dict:
         logger.error(f"Error reading config.yaml: {e}")
         sys.exit(1)
 
-async def main():
-    logger.info("Starting Telegram to Discord Forwarder...")
-    config = load_config()
+# Initialize Discord Command Bot
+intents = discord.Intents.default()
+intents.message_content = True
+discord_bot = commands.Bot(command_prefix="!", intents=intents)
+
+@discord_bot.event
+async def on_ready():
+    logger.info(f"Discord Command Bot connected as {discord_bot.user}")
+    try:
+        logger.info("Synchronizing slash commands globally...")
+        synced = await discord_bot.tree.sync()
+        logger.info(f"Successfully synchronized {len(synced)} slash command(s).")
+    except Exception as e:
+        logger.error(f"Failed to synchronize slash commands: {e}")
+
+# Helper helper to generate status embed
+async def build_status_embed():
+    global tg_client, channel_to_webhook
+    tg_connected = tg_client.is_connected() if tg_client else False
+    tg_auth = await tg_client.is_user_authorized() if tg_client and tg_connected else False
     
+    embed = discord.Embed(
+        title="🔄 Forwarder Status Report",
+        color=discord.Color.green() if (tg_connected and tg_auth) else discord.Color.red()
+    )
+    embed.add_field(name="Telegram Service", value="Connected & Authorized ✅" if (tg_connected and tg_auth) else "Disconnected ❌", inline=True)
+    embed.add_field(name="Discord Command Bot", value="Online ✅", inline=True)
+    embed.add_field(name="Active Mapped Channels", value=f"{len(channel_to_webhook)} channel(s)", inline=False)
+    return embed
+
+# Helper helper to generate mappings list embed
+def build_list_embed():
+    global channel_to_webhook
+    if not channel_to_webhook:
+        return None
+        
+    embed = discord.Embed(title="📋 Active Channel Mappings", color=discord.Color.blue())
+    for ch_id, (entity, webhook_key) in channel_to_webhook.items():
+        title = getattr(entity, 'title', f"ID: {ch_id}")
+        webhook_url = forwarder_instance.webhooks.get(webhook_key, "Unknown URL")
+        masked_url = webhook_url[:45] + "..." if len(webhook_url) > 45 else webhook_url
+        embed.add_field(
+            name=f"📢 {title}",
+            value=f"• **Telegram ID:** `{ch_id}`\n• **Webhook Key:** `{webhook_key}`\n• **Webhook URL:** `{masked_url}`",
+            inline=False
+        )
+    return embed
+
+# --- PREFIX COMMANDS ---
+
+@discord_bot.command(name="status")
+async def cmd_status(ctx):
+    """Shows forwarder connection status."""
+    embed = await build_status_embed()
+    await ctx.send(embed=embed)
+
+@discord_bot.command(name="list")
+async def cmd_list(ctx):
+    """Lists all mapped Telegram channels."""
+    embed = build_list_embed()
+    if not embed:
+        await ctx.send("No Telegram channels are currently mapped to forward messages.")
+        return
+    await ctx.send(embed=embed)
+
+@discord_bot.command(name="add")
+async def cmd_add(ctx, telegram_channel: str, webhook_url: str):
+    """Maps a new Telegram channel. Usage: !add <id> <url>"""
+    if not webhook_url.startswith("https://discord.com/api/webhooks/"):
+        await ctx.send("❌ Error: Webhook URL must start with `https://discord.com/api/webhooks/`")
+        return
+        
+    await ctx.send(f"⏳ Attempting to resolve and subscribe to Telegram channel `{telegram_channel}`...")
+    
+    resolved = telegram_channel
+    if telegram_channel.startswith('-') or telegram_channel.isdigit():
+        try:
+            resolved = int(telegram_channel)
+        except ValueError:
+            pass
+            
+    try:
+        entity = await tg_client.get_entity(resolved)
+        webhook_key = forwarder_instance.add_mapping(entity.id, webhook_url)
+        channel_to_webhook[entity.id] = (entity, webhook_key)
+        await update_tg_listeners()
+        
+        embed = discord.Embed(title="✅ Mapping Added Successfully", color=discord.Color.green())
+        embed.add_field(name="Telegram Channel", value=f"**{entity.title}** (`{entity.id}`)", inline=False)
+        embed.add_field(name="Target Webhook Key", value=f"`{webhook_key}`", inline=True)
+        await ctx.send(embed=embed)
+    except Exception as e:
+        logger.error(f"Failed to add mapping: {e}")
+        await ctx.send(f"❌ Error: Could not resolve channel `{telegram_channel}`. Reason: `{e}`")
+
+@discord_bot.command(name="remove")
+async def cmd_remove(ctx, telegram_channel: str):
+    """Removes a mapped Telegram channel. Usage: !remove <id_or_title>"""
+    matched_id = None
+    matched_entity = None
+    target_str = str(telegram_channel)
+    
+    for ch_id, (entity, _) in channel_to_webhook.items():
+        if str(ch_id) == target_str or str(ch_id).replace('-100', '') == target_str:
+            matched_id = ch_id
+            matched_entity = entity
+            break
+        if hasattr(entity, 'username') and entity.username and entity.username.lower() == target_str.lower().lstrip('@'):
+            matched_id = ch_id
+            matched_entity = entity
+            break
+        if hasattr(entity, 'title') and entity.title.lower() == target_str.lower():
+            matched_id = ch_id
+            matched_entity = entity
+            break
+            
+    if not matched_id:
+        await ctx.send(f"❌ Error: Could not find '{telegram_channel}' in active mappings.")
+        return
+
+    title = matched_entity.title if matched_entity else f"ID: {matched_id}"
+    success = forwarder_instance.remove_mapping(matched_id)
+    if success:
+        channel_to_webhook.pop(matched_id, None)
+        await update_tg_listeners()
+        await ctx.send(f"✅ Successfully removed forwarding mapping for **{title}** (`{matched_id}`).")
+    else:
+        await ctx.send(f"❌ Error: Failed to remove mapping. Config-defined channels must be removed directly inside settings.")
+
+# --- SLASH COMMANDS ---
+
+@discord_bot.tree.command(name="status", description="Shows forwarder connection status and system health")
+async def slash_status(interaction: discord.Interaction):
+    embed = await build_status_embed()
+    await interaction.response.send_message(embed=embed)
+
+@discord_bot.tree.command(name="list", description="Lists all mapped Telegram channels and webhooks")
+async def slash_list(interaction: discord.Interaction):
+    embed = build_list_embed()
+    if not embed:
+        await interaction.response.send_message("No Telegram channels are currently mapped to forward messages.", ephemeral=True)
+        return
+    await interaction.response.send_message(embed=embed)
+
+@discord_bot.tree.command(name="add", description="Maps a new Telegram channel to a Discord Webhook")
+@app_commands.describe(
+    telegram_channel="Telegram channel username (e.g. durov) or numeric ID (e.g. -100...)",
+    webhook_url="Discord Webhook URL where messages should be forwarded"
+)
+async def slash_add(interaction: discord.Interaction, telegram_channel: str, webhook_url: str):
+    if not webhook_url.startswith("https://discord.com/api/webhooks/"):
+        await interaction.response.send_message("❌ Error: Webhook URL must start with `https://discord.com/api/webhooks/`", ephemeral=True)
+        return
+        
+    # Defer response to handle network latency
+    await interaction.response.defer(ephemeral=False)
+    
+    resolved = telegram_channel
+    if telegram_channel.startswith('-') or telegram_channel.isdigit():
+        try:
+            resolved = int(telegram_channel)
+        except ValueError:
+            pass
+            
+    try:
+        entity = await tg_client.get_entity(resolved)
+        webhook_key = forwarder_instance.add_mapping(entity.id, webhook_url)
+        channel_to_webhook[entity.id] = (entity, webhook_key)
+        await update_tg_listeners()
+        
+        embed = discord.Embed(title="✅ Mapping Added Successfully", color=discord.Color.green())
+        embed.add_field(name="Telegram Channel", value=f"**{entity.title}** (`{entity.id}`)", inline=False)
+        embed.add_field(name="Target Webhook Key", value=f"`{webhook_key}`", inline=True)
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        logger.error(f"Failed to add mapping via slash command: {e}")
+        await interaction.followup.send(f"❌ Error: Could not resolve channel `{telegram_channel}`. Reason: `{e}`")
+
+@discord_bot.tree.command(name="remove", description="Removes a mapped Telegram channel mapping")
+@app_commands.describe(
+    telegram_channel="Telegram channel username, ID, or title to remove"
+)
+async def slash_remove(interaction: discord.Interaction, telegram_channel: str):
+    await interaction.response.defer(ephemeral=False)
+    matched_id = None
+    matched_entity = None
+    target_str = str(telegram_channel)
+    
+    for ch_id, (entity, _) in channel_to_webhook.items():
+        if str(ch_id) == target_str or str(ch_id).replace('-100', '') == target_str:
+            matched_id = ch_id
+            matched_entity = entity
+            break
+        if hasattr(entity, 'username') and entity.username and entity.username.lower() == target_str.lower().lstrip('@'):
+            matched_id = ch_id
+            matched_entity = entity
+            break
+        if hasattr(entity, 'title') and entity.title.lower() == target_str.lower():
+            matched_id = ch_id
+            matched_entity = entity
+            break
+            
+    if not matched_id:
+        await interaction.followup.send(f"❌ Error: Could not find '{telegram_channel}' in active mappings.")
+        return
+
+    title = matched_entity.title if matched_entity else f"ID: {matched_id}"
+    success = forwarder_instance.remove_mapping(matched_id)
+    if success:
+        channel_to_webhook.pop(matched_id, None)
+        await update_tg_listeners()
+        await interaction.followup.send(f"✅ Successfully removed forwarding mapping for **{title}** (`{matched_id}`).")
+    else:
+        await interaction.followup.send(f"❌ Error: Failed to remove mapping. Config-defined channels must be removed directly inside settings.")
+
+# --- UTILS AND DRIVER ---
+
+async def update_tg_listeners():
+    global tg_client, active_telegram_handler, channel_to_webhook
+    
+    if active_telegram_handler:
+        try:
+            tg_client.remove_event_handler(active_telegram_handler)
+        except Exception:
+            pass
+            
+    channel_ids = list(channel_to_webhook.keys())
+    if not channel_ids:
+        active_telegram_handler = None
+        return
+
+    async def handler(event):
+        chat_id = event.chat_id
+        mapped_item = channel_to_webhook.get(chat_id)
+        if not mapped_item:
+            for resolved_id, item in channel_to_webhook.items():
+                if abs(resolved_id) == abs(chat_id) or str(resolved_id) in str(chat_id):
+                    mapped_item = item
+                    break
+        if not mapped_item:
+            return
+            
+        entity, webhook_key = mapped_item
+        logger.info(f"New message in '{entity.title}' ({chat_id}). Forwarding...")
+        await forwarder_instance.forward_message(tg_client, entity, event.message, webhook_key)
+
+    tg_client.add_event_handler(handler, events.NewMessage(chats=channel_ids))
+    active_telegram_handler = handler
+    logger.info(f"Telethon registered message listeners for {len(channel_ids)} channels.")
+
+async def main():
+    global tg_client, forwarder_instance, channel_to_webhook
+    logger.info("Starting Telegram & Discord Integrated Forwarder...")
+    
+    config = load_config()
     telegram_cfg = config.get("telegram", {})
     api_id = telegram_cfg.get("api_id")
     api_hash = telegram_cfg.get("api_hash")
     phone = telegram_cfg.get("phone")
     
+    discord_cfg = config.get("discord", {})
+    discord_token = discord_cfg.get("bot_token")
+    
     if not api_id or not api_hash:
         logger.error("Telegram api_id and api_hash must be set in config.yaml!")
         sys.exit(1)
         
-    mappings = config.get("mappings", [])
-    if not mappings:
-        logger.error("No channel mappings defined in config.yaml!")
-        sys.exit(1)
-
-    # Initialize Discord Forwarder
-    forwarder = DiscordForwarder(config)
-    
-    # Initialize Telethon Client
+    forwarder_instance = DiscordForwarder(config)
     session_name = "telegram_forwarder_session"
-    client = TelegramClient(session_name, api_id, api_hash)
+    tg_client = TelegramClient(session_name, api_id, api_hash)
     
     logger.info("Connecting to Telegram...")
-    await client.start(phone=phone)
+    await tg_client.start(phone=phone)
     logger.info("Successfully authenticated with Telegram.")
     
-    # Resolve all channels to get IDs and verify access
-    channel_to_webhook = {}
-    for mapping in mappings:
+    for mapping in forwarder_instance.get_all_mappings():
         channel_name = mapping.get("telegram_channel")
         webhook_key = mapping.get("webhook_key")
-        
         if not channel_name or not webhook_key:
-            logger.warning(f"Skipping invalid mapping: {mapping}")
             continue
             
         try:
-            # If the user put a string representing a number, convert it
             if isinstance(channel_name, str) and (channel_name.startswith('-') or channel_name.isdigit()):
-                try:
-                    channel_name = int(channel_name)
-                except ValueError:
-                    pass
-
-            entity = await client.get_entity(channel_name)
+                channel_name = int(channel_name)
+            entity = await tg_client.get_entity(channel_name)
             channel_to_webhook[entity.id] = (entity, webhook_key)
-            logger.info(f"Mapped Channel: '{entity.title}' ({entity.id}) -> Webhook key: '{webhook_key}'")
+            logger.info(f"Mapped Channel: '{entity.title}' ({entity.id}) -> Webhook: '{webhook_key}'")
         except Exception as e:
             logger.error(f"Failed to resolve channel '{channel_name}': {e}")
-            logger.error("Please verify that the name/ID is correct and your Telegram account has access to it.")
             
-    if not channel_to_webhook:
-        logger.error("No Telegram channels could be resolved! Exiting.")
-        await client.disconnect()
-        sys.exit(1)
-        
-    # Register listeners
-    channel_ids = list(channel_to_webhook.keys())
+    await update_tg_listeners()
     
-    @client.on(events.NewMessage(chats=channel_ids))
-    async def handler(event):
-        chat_id = event.chat_id
+    discord_task = None
+    if discord_token:
+        logger.info("Starting Discord command bot...")
+        discord_task = asyncio.create_task(discord_bot.start(discord_token))
+    else:
+        logger.warning("No discord.bot_token found. Running in Webhook-only mode.")
         
-        # Telethon's event.chat_id is normally the raw channel/chat ID (int)
-        # Look up key directly or check if we need to resolve it
-        mapped_item = channel_to_webhook.get(chat_id)
-        if not mapped_item:
-            # Fallback check for Peer objects or absolute value match
-            for resolved_id, item in channel_to_webhook.items():
-                # Compare absolute values since Telethon sometimes handles negative/positive signs differently
-                # depending on whether it's a channel, group, or user ID
-                if abs(resolved_id) == abs(chat_id) or str(resolved_id) in str(chat_id):
-                    mapped_item = item
-                    break
-            
-        if not mapped_item:
-            logger.debug(f"Received message from unmapped chat ID {chat_id}, ignoring.")
-            return
-            
-        entity, webhook_key = mapped_item
-        logger.info(f"New message detected in '{entity.title}' ({chat_id}). Forwarding...")
-        await forwarder.forward_message(client, entity, event.message, webhook_key)
-
-    logger.info("Listening for new messages... Press Ctrl+C to exit.")
-    await client.run_until_disconnected()
+    try:
+        logger.info("Listening for new messages...")
+        await tg_client.run_until_disconnected()
+    finally:
+        if discord_task:
+            logger.info("Stopping Discord command bot...")
+            await discord_bot.close()
+            await discord_task
+        logger.info("Application shut down.")
 
 if __name__ == "__main__":
     try:
