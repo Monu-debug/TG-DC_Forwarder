@@ -11,6 +11,7 @@ from forwarder import DiscordForwarder
 import discord
 from discord.ext import commands
 from discord import app_commands
+from typing import List
 
 # Set page configuration
 st.set_page_config(
@@ -90,6 +91,7 @@ class BotManager:
         self.channel_to_webhook = {}
         self.active_telegram_handler = None
         self.discord_task = None
+        self.cached_telegram_channels = []
         self.logs = []
         
     def log(self, message: str, level=logging.INFO):
@@ -132,10 +134,32 @@ class BotManager:
             self.error_msg = str(e)
             self.log(f"Critical error in main loop: {e}", logging.ERROR)
 
+    async def cache_telegram_dialogs(self):
+        """Retrieves and caches Telegram channels the account is joined to."""
+        if not self.client or not self.client.is_connected():
+            return
+            
+        try:
+            self.log("Caching Telegram channels for autocomplete...")
+            channels = []
+            async for dialog in self.client.iter_dialogs():
+                if dialog.is_channel or dialog.is_group:
+                    entity = dialog.entity
+                    title = getattr(entity, 'title', 'Unknown Title')
+                    username = getattr(entity, 'username', '') or ''
+                    channels.append({
+                        "title": title,
+                        "id": str(entity.id),
+                        "username": username
+                    })
+            self.cached_telegram_channels = channels
+            self.log(f"Cached {len(channels)} Telegram chats/channels.")
+        except Exception as e:
+            self.log(f"Error caching Telegram channels: {e}", logging.ERROR)
+
     async def _main_loop(self):
         config = None
         
-        # Try loading from Streamlit secrets first
         try:
             if len(st.secrets) > 0 and "telegram" in st.secrets:
                 self.log("Loading configuration from Streamlit Cloud secrets...")
@@ -143,7 +167,6 @@ class BotManager:
         except Exception as e:
             self.log(f"Streamlit secrets not configured or readable: {e}", logging.DEBUG)
 
-        # Fallback to local config.yaml
         if not config:
             if not os.path.exists("config.yaml"):
                 self.status = "Error"
@@ -238,6 +261,9 @@ class BotManager:
                 return
 
         self.log("Telegram client successfully authenticated!")
+        
+        # Cache dialogs for autocomplete
+        asyncio.create_task(self.cache_telegram_dialogs())
         
         # Resolve mappings
         self.channel_to_webhook = {}
@@ -376,7 +402,6 @@ def build_list_embed():
     return embed
 
 async def get_or_create_webhook(channel: discord.TextChannel) -> str:
-    # Check permissions
     permissions = channel.permissions_for(channel.guild.me)
     if not permissions.manage_webhooks:
         raise PermissionError(
@@ -389,7 +414,6 @@ async def get_or_create_webhook(channel: discord.TextChannel) -> str:
         if wh.user == discord_bot.user:
             return wh.url
             
-    # Create new webhook if not found
     new_wh = await channel.create_webhook(name="Telegram Forwarder Link")
     return new_wh.url
 
@@ -510,7 +534,7 @@ async def cmd_remove(ctx, telegram_channel: str):
     else:
         await ctx.send(f"❌ Error: Failed to remove mapping. Mappings defined in settings/secrets must be removed there directly.")
 
-# --- SLASH COMMANDS ---
+# --- SLASH COMMANDS (WITH AUTOCOMPLETE & NATIVE CHANNEL SELECTORS) ---
 
 @discord_bot.tree.command(name="status", description="Shows forwarder connection status and system health")
 async def slash_status(interaction: discord.Interaction):
@@ -525,25 +549,19 @@ async def slash_list(interaction: discord.Interaction):
         return
     await interaction.response.send_message(embed=embed)
 
-@discord_bot.tree.command(name="add", description="Maps a new Telegram channel to a Discord Channel or Webhook")
+@discord_bot.tree.command(name="add", description="Maps a new Telegram channel to a Discord Channel")
 @app_commands.describe(
-    telegram_channel="Telegram channel username (e.g. durov) or numeric ID (e.g. -100...)",
-    discord_target="Discord channel name, ID, mention, or a raw Webhook URL"
+    telegram_channel="Select or type the Telegram channel (autofills from your joined channels)",
+    discord_channel="Select the text channel where messages should be forwarded"
 )
-async def slash_add(interaction: discord.Interaction, telegram_channel: str, discord_target: str):
+async def slash_add(interaction: discord.Interaction, telegram_channel: str, discord_channel: discord.TextChannel):
     await interaction.response.defer(ephemeral=False)
     
-    webhook_url = None
-    if discord_target.startswith("https://discord.com/api/webhooks/"):
-        webhook_url = discord_target
-    else:
-        try:
-            # Resolve inside guild context
-            channel = await resolve_discord_channel(interaction.guild, discord_target)
-            webhook_url = await get_or_create_webhook(channel)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error: {e}")
-            return
+    try:
+        webhook_url = await get_or_create_webhook(discord_channel)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}")
+        return
             
     resolved = telegram_channel
     if telegram_channel.startswith('-') or telegram_channel.isdigit():
@@ -553,7 +571,6 @@ async def slash_add(interaction: discord.Interaction, telegram_channel: str, dis
             pass
             
     try:
-        # Run Telethon calls threadsafe
         future = asyncio.run_coroutine_threadsafe(manager.client.get_entity(resolved), manager.loop)
         entity = await asyncio.wrap_future(future)
         
@@ -565,15 +582,18 @@ async def slash_add(interaction: discord.Interaction, telegram_channel: str, dis
         
         embed = discord.Embed(title="✅ Mapping Added Successfully", color=discord.Color.green())
         embed.add_field(name="Telegram Channel", value=f"**{entity.title}** (`{entity.id}`)", inline=False)
-        embed.add_field(name="Target Webhook Key", value=f"`{webhook_key}`", inline=True)
+        embed.add_field(name="Discord Channel", value=discord_channel.mention, inline=True)
         await interaction.followup.send(embed=embed)
+        
+        # Reload dialogs cache
+        asyncio.run_coroutine_threadsafe(manager.cache_telegram_dialogs(), manager.loop)
     except Exception as e:
         manager.log(f"Failed to add mapping via slash command: {e}", logging.ERROR)
         await interaction.followup.send(f"❌ Error: Could not resolve channel `{telegram_channel}`. Reason: `{e}`")
 
 @discord_bot.tree.command(name="remove", description="Removes a mapped Telegram channel mapping")
 @app_commands.describe(
-    telegram_channel="Telegram channel username, ID, or title to remove"
+    telegram_channel="Select the mapped Telegram channel to remove"
 )
 async def slash_remove(interaction: discord.Interaction, telegram_channel: str):
     await interaction.response.defer(ephemeral=False)
@@ -583,14 +603,6 @@ async def slash_remove(interaction: discord.Interaction, telegram_channel: str):
     
     for ch_id, (entity, _) in manager.channel_to_webhook.items():
         if str(ch_id) == target_str or str(ch_id).replace('-100', '') == target_str:
-            matched_id = ch_id
-            matched_entity = entity
-            break
-        if hasattr(entity, 'username') and entity.username and entity.username.lower() == target_str.lower().lstrip('@'):
-            matched_id = ch_id
-            matched_entity = entity
-            break
-        if hasattr(entity, 'title') and entity.title.lower() == target_str.lower():
             matched_id = ch_id
             matched_entity = entity
             break
@@ -609,6 +621,51 @@ async def slash_remove(interaction: discord.Interaction, telegram_channel: str):
         await interaction.followup.send(f"✅ Successfully removed forwarding mapping for **{title}** (`{matched_id}`).")
     else:
         await interaction.followup.send(f"❌ Error: Failed to remove mapping. Mappings defined in settings/secrets must be removed there directly.")
+
+# --- AUTOCOMPLETE PROVIDERS ---
+
+@slash_add.autocomplete('telegram_channel')
+async def add_telegram_autocomplete(
+    interaction: discord.Interaction,
+    current: str
+) -> List[app_commands.Choice[str]]:
+    choices = []
+    search = current.lower()
+    count = 0
+    for ch in manager.cached_telegram_channels:
+        title = ch["title"]
+        username = ch["username"]
+        ch_id = ch["id"]
+        if search in title.lower() or (username and search in username.lower()) or search in ch_id:
+            display_name = f"{title} (@{username})" if username else title
+            if len(display_name) > 100:
+                display_name = display_name[:97] + "..."
+            choices.append(app_commands.Choice(name=display_name, value=ch_id))
+            count += 1
+            if count >= 25:
+                break
+    return choices
+
+@slash_remove.autocomplete('telegram_channel')
+async def remove_telegram_autocomplete(
+    interaction: discord.Interaction,
+    current: str
+) -> List[app_commands.Choice[str]]:
+    choices = []
+    search = current.lower()
+    count = 0
+    for ch_id, (entity, _) in manager.channel_to_webhook.items():
+        title = getattr(entity, 'title', f"ID: {ch_id}")
+        username = getattr(entity, 'username', '') or ''
+        if search in title.lower() or (username and search in username.lower()) or search in str(ch_id):
+            display_name = f"{title} (ID: {ch_id})"
+            if len(display_name) > 100:
+                display_name = display_name[:97] + "..."
+            choices.append(app_commands.Choice(name=display_name, value=str(ch_id)))
+            count += 1
+            if count >= 25:
+                break
+    return choices
 
 # --- WEB APP INTERFACE ---
 
