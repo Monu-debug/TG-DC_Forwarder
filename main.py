@@ -9,6 +9,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from typing import List
+from aiohttp import web
 
 # Configure Logging
 logging.basicConfig(
@@ -184,7 +185,7 @@ async def cmd_add(ctx, telegram_channel: str, discord_target: str):
             await ctx.send(f"❌ Error: {e}")
             return
             
-    await ctx.send(f"⏳ Attempting to resolve and subscribe to Telegram channel `{telegram_channel}`...")
+    await ctx.send(f"⏳ Attempting to subscribe to Telegram channel `{telegram_channel}`...")
     
     resolved = telegram_channel
     if telegram_channel.startswith('-') or telegram_channel.isdigit():
@@ -390,6 +391,27 @@ async def remove_telegram_autocomplete(
                 break
     return choices
 
+# --- BACKEND WEB SERVER FOR KEEP-ALIVES (E.G. RENDER HOSTING) ---
+
+async def handle_ping(request):
+    return web.Response(text="Telegram Discord Forwarder is Active and Online!")
+
+async def start_background_webserver():
+    """Starts a tiny background webserver to respond to Render pings."""
+    try:
+        app = web.Application()
+        app.router.add_get('/', handle_ping)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        
+        # Render specifies the port in the PORT environment variable
+        port = int(os.environ.get("PORT", 8080))
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        logger.info(f"Keep-alive webserver started on port {port}")
+    except Exception as e:
+        logger.error(f"Failed to start keep-alive webserver: {e}")
+
 # --- UTILS AND DRIVER ---
 
 async def update_tg_listeners():
@@ -430,6 +452,9 @@ async def main():
     global tg_client, forwarder_instance, channel_to_webhook
     logger.info("Starting Telegram & Discord Integrated Forwarder...")
     
+    # Start the keep-alive webserver in the background (essential for Render)
+    asyncio.create_task(start_background_webserver())
+    
     config = load_config()
     telegram_cfg = config.get("telegram", {})
     api_id = telegram_cfg.get("api_id")
@@ -462,7 +487,6 @@ async def main():
                 channel_name = int(channel_name)
             entity = await tg_client.get_entity(channel_name)
             
-            # Support multiple webhooks mapped to the same channel on boot
             if entity.id in channel_to_webhook:
                 _, keys = channel_to_webhook[entity.id]
                 if webhook_key not in keys:
