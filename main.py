@@ -452,8 +452,22 @@ async def main():
     global tg_client, forwarder_instance, channel_to_webhook
     logger.info("Starting Telegram & Discord Integrated Forwarder...")
     
+    # Recreate the binary session file if Base64 encoded version is provided in Environment Variables
+    session_b64 = os.environ.get("TELEGRAM_SESSION_BASE64")
+    if session_b64:
+        logger.info("Found TELEGRAM_SESSION_BASE64 environment variable. Recreating session file...")
+        try:
+            import base64
+            session_bytes = base64.b64decode(session_b64.strip())
+            with open("telegram_forwarder_session.session", "wb") as f:
+                f.write(session_bytes)
+            logger.info("Session file successfully recreated from environment variable.")
+        except Exception as e:
+            logger.error(f"Failed to recreate session file from environment variable: {e}")
+
     # Start the keep-alive webserver in the background (essential for Render)
     asyncio.create_task(start_background_webserver())
+
     
     config = load_config()
     telegram_cfg = config.get("telegram", {})

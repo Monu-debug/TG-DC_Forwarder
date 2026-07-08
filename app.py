@@ -198,8 +198,22 @@ class BotManager:
             self.log(self.error_msg, logging.ERROR)
             return
 
+        # Check for Base64 encoded Telegram session environment variable
+        session_b64 = os.environ.get("TELEGRAM_SESSION_BASE64")
+        if session_b64:
+            self.log("Found TELEGRAM_SESSION_BASE64 environment variable. Recreating session file...")
+            try:
+                import base64
+                session_bytes = base64.b64decode(session_b64.strip())
+                with open("telegram_forwarder_session.session", "wb") as f:
+                    f.write(session_bytes)
+                self.log("Session file successfully recreated from environment variable.")
+            except Exception as e:
+                self.log(f"Failed to recreate session file from environment variable: {e}", logging.ERROR)
+
         # Initialize Telethon Client
         self.client = TelegramClient("telegram_forwarder_session", api_id, api_hash)
+
         self.forwarder = DiscordForwarder(config)
 
         self.log("Connecting to Telegram...")
