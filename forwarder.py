@@ -203,7 +203,7 @@ class DiscordForwarder:
         return text if text else ""
 
     async def upload_to_external_storage(self, file_path: str, file_size: int) -> Optional[str]:
-        """Uploads file to Catbox (<=200MB) or Litterbox (<=1GB) to bypass Discord upload limits."""
+        """Uploads file to Catbox (<=200MB) or PixelDrain (200MB - 3GB) to bypass Discord upload limits."""
         # Catbox (up to 200MB)
         if file_size <= 200 * 1024 * 1024:
             url = "https://catbox.moe/user/api.php"
@@ -221,24 +221,25 @@ class DiscordForwarder:
                                 logger.error(f"Catbox upload failed with status {resp.status}")
             except Exception as e:
                 logger.error(f"Catbox upload error: {e}")
-        # Litterbox (up to 1GB, temporary for 72 hours)
-        elif file_size <= 1024 * 1024 * 1024:
-            url = "https://litterbox.catbox.moe/resources/internals/api.php"
+        # PixelDrain (up to 3GB)
+        elif file_size <= 3 * 1024 * 1024 * 1024:
+            url = "https://pixeldrain.com/api/file"
             data = aiohttp.FormData()
-            data.add_field("reqtype", "fileupload")
-            data.add_field("time", "72h")
             try:
                 with open(file_path, "rb") as f:
-                    data.add_field("fileToUpload", f, filename=os.path.basename(file_path))
+                    data.add_field("file", f, filename=os.path.basename(file_path))
                     async with aiohttp.ClientSession() as session:
                         async with session.post(url, data=data) as resp:
-                            if resp.status == 200:
-                                res_url = await resp.text()
-                                return res_url.strip()
+                            if resp.status in (200, 201):
+                                res_json = await resp.json()
+                                file_id = res_json.get("id")
+                                if file_id:
+                                    return f"https://pixeldrain.com/api/file/{file_id}"
                             else:
-                                logger.error(f"Litterbox upload failed with status {resp.status}")
+                                error_text = await resp.text()
+                                logger.error(f"PixelDrain upload failed with status {resp.status}: {error_text}")
             except Exception as e:
-                logger.error(f"Litterbox upload error: {e}")
+                logger.error(f"PixelDrain upload error: {e}")
         return None
 
     async def forward_message(self, client, entity, message, webhook_key: str):
@@ -281,8 +282,8 @@ class DiscordForwarder:
             max_bytes = self.settings.get("download_max_size_mb", 25) * 1024 * 1024
             
             if file_size_bytes > max_bytes:
-                # If file is within external hosting limits (1GB)
-                if use_external_hosting and file_size_bytes <= 1024 * 1024 * 1024:
+                # If file is within external hosting limits (3GB)
+                if use_external_hosting and file_size_bytes <= 3 * 1024 * 1024 * 1024:
                     logger.info(f"File size {file_size_bytes / (1024*1024):.1f}MB exceeds Discord limit. Downloading and uploading to external hosting...")
                     temp_filename = f"media_{entity.id}_{message.id}"
                     media_path = await client.download_media(message, file=os.path.join(self.temp_dir, temp_filename))
@@ -314,7 +315,7 @@ class DiscordForwarder:
                         media_path = None
                     has_media = False
                 else:
-                    warning = f"\n\n*⚠️ [Media attachment omitted: size {file_size_bytes / (1024*1024):.1f}MB exceeds Discord's file size limit]*"
+                    warning = f"\n\n*⚠️ [Media attachment omitted: size {file_size_bytes / (1024*1024):.1f}MB exceeds local hosting or external limits]*"
                     if content_parts:
                         content_parts[-1] += warning
                     else:
