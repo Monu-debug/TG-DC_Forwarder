@@ -441,8 +441,9 @@ async def update_tg_listeners():
             
         entity, webhook_keys = mapped_item
         logger.info(f"New message in '{entity.title}' ({chat_id}). Forwarding to {len(webhook_keys)} webhooks...")
-        for key in webhook_keys:
-            await forwarder_instance.forward_message(tg_client, entity, event.message, key)
+        tasks = [forwarder_instance.forward_message(tg_client, entity, event.message, key) for key in webhook_keys]
+        await asyncio.gather(*tasks)
+
 
     tg_client.add_event_handler(handler, events.NewMessage(chats=channel_ids))
     active_telegram_handler = handler

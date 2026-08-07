@@ -341,8 +341,9 @@ class BotManager:
             
             entity, webhook_keys = mapped_item
             self.log(f"Detected new message in '{entity.title}'. Forwarding to {len(webhook_keys)} webhooks...")
-            for key in webhook_keys:
-                await self.forwarder.forward_message(self.client, entity, event.message, key)
+            tasks = [self.forwarder.forward_message(self.client, entity, event.message, key) for key in webhook_keys]
+            await asyncio.gather(*tasks)
+
 
         self.client.add_event_handler(handler, events.NewMessage(chats=channel_ids))
         self.active_telegram_handler = handler
