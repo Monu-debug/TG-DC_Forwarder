@@ -210,6 +210,60 @@ class DiscordForwarder:
     def clean_markdown(self, text: str) -> str:
         return text if text else ""
 
+    async def _download_media_robust(self, client, message, file_path: str, progress_callback=None) -> Optional[str]:
+        """Downloads media from Telegram with a chunk timeout and retry-resume logic."""
+        total_size = message.file.size if message.file else 0
+        max_retries = 5
+        
+        # Ensure target directory exists
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        
+        for attempt in range(max_retries):
+            offset = 0
+            if os.path.exists(file_path):
+                offset = os.path.getsize(file_path)
+                
+            logger.info(f"Downloading media (attempt {attempt + 1}/{max_retries}) starting at offset {offset / (1024*1024):.1f}MB of {total_size / (1024*1024):.1f}MB...")
+            
+            mode = "ab" if offset > 0 else "wb"
+            try:
+                with open(file_path, mode) as fd:
+                    download_iter = client.iter_download(
+                        message.media, 
+                        offset=offset, 
+                        request_size=1024 * 1024
+                    )
+                    
+                    while True:
+                        try:
+                            # 30-second timeout on fetching next chunk (prevents infinite TCP read blocks)
+                            chunk = await asyncio.wait_for(download_iter.__anext__(), timeout=30.0)
+                            fd.write(chunk)
+                            offset += len(chunk)
+                            if progress_callback:
+                                progress_callback(offset, total_size)
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError:
+                            logger.warning(f"Download chunk timed out (30s) at offset {offset / (1024*1024):.1f}MB. Retrying...")
+                            raise ConnectionError("Download chunk timeout")
+                            
+                # Succeeded
+                return file_path
+                
+            except Exception as e:
+                logger.error(f"Download attempt {attempt + 1} failed: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(5)
+                else:
+                    if os.path.exists(file_path):
+                        try:
+                            os.remove(file_path)
+                        except Exception:
+                            pass
+                    return None
+
+
     async def upload_to_external_storage(self, file_path: str, file_size: int) -> Optional[str]:
         """Uploads file to Catbox (<=200MB) or PixelDrain (200MB - 3GB) to bypass Discord upload limits."""
         # Catbox (up to 200MB)
@@ -367,9 +421,10 @@ class DiscordForwarder:
                                     last_percent[0] = percent
                                     logger.info(f"Telegram Download: {current / (1024*1024):.1f}MB / {total / (1024*1024):.1f}MB ({percent}%)")
 
-                            media_path = await client.download_media(
-                                message, 
-                                file=os.path.join(self.temp_dir, temp_filename),
+                            media_path = await self._download_media_robust(
+                                client,
+                                message,
+                                os.path.join(self.temp_dir, temp_filename),
                                 progress_callback=progress_callback
                             )
                             
