@@ -202,6 +202,45 @@ class DiscordForwarder:
     def clean_markdown(self, text: str) -> str:
         return text if text else ""
 
+    async def upload_to_external_storage(self, file_path: str, file_size: int) -> Optional[str]:
+        """Uploads file to Catbox (<=200MB) or Litterbox (<=1GB) to bypass Discord upload limits."""
+        # Catbox (up to 200MB)
+        if file_size <= 200 * 1024 * 1024:
+            url = "https://catbox.moe/user/api.php"
+            data = aiohttp.FormData()
+            data.add_field("reqtype", "fileupload")
+            try:
+                with open(file_path, "rb") as f:
+                    data.add_field("fileToUpload", f, filename=os.path.basename(file_path))
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(url, data=data) as resp:
+                            if resp.status == 200:
+                                res_url = await resp.text()
+                                return res_url.strip()
+                            else:
+                                logger.error(f"Catbox upload failed with status {resp.status}")
+            except Exception as e:
+                logger.error(f"Catbox upload error: {e}")
+        # Litterbox (up to 1GB, temporary for 72 hours)
+        elif file_size <= 1024 * 1024 * 1024:
+            url = "https://litterbox.catbox.moe/resources/internals/api.php"
+            data = aiohttp.FormData()
+            data.add_field("reqtype", "fileupload")
+            data.add_field("time", "72h")
+            try:
+                with open(file_path, "rb") as f:
+                    data.add_field("fileToUpload", f, filename=os.path.basename(file_path))
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(url, data=data) as resp:
+                            if resp.status == 200:
+                                res_url = await resp.text()
+                                return res_url.strip()
+                            else:
+                                logger.error(f"Litterbox upload failed with status {resp.status}")
+            except Exception as e:
+                logger.error(f"Litterbox upload error: {e}")
+        return None
+
     async def forward_message(self, client, entity, message, webhook_key: str):
         webhook_url = self.webhooks.get(webhook_key)
         if not webhook_url:
@@ -235,17 +274,52 @@ class DiscordForwarder:
         media_path = None
         file_name = None
         has_media = message.media is not None and self.settings.get("forward_media", True)
+        use_external_hosting = self.settings.get("use_external_hosting", True)
 
         if has_media:
             file_size_bytes = message.file.size if message.file else 0
             max_bytes = self.settings.get("download_max_size_mb", 25) * 1024 * 1024
+            
             if file_size_bytes > max_bytes:
-                warning = f"\n\n*⚠️ [Media attachment omitted: size {file_size_bytes / (1024*1024):.1f}MB exceeds Discord's file size limit]*"
-                if content_parts:
-                    content_parts[-1] += warning
+                # If file is within external hosting limits (1GB)
+                if use_external_hosting and file_size_bytes <= 1024 * 1024 * 1024:
+                    logger.info(f"File size {file_size_bytes / (1024*1024):.1f}MB exceeds Discord limit. Downloading and uploading to external hosting...")
+                    temp_filename = f"media_{entity.id}_{message.id}"
+                    media_path = await client.download_media(message, file=os.path.join(self.temp_dir, temp_filename))
+                    
+                    if media_path:
+                        uploaded_url = await self.upload_to_external_storage(media_path, file_size_bytes)
+                        if uploaded_url:
+                            logger.info(f"Successfully uploaded media to external host: {uploaded_url}")
+                            # Append direct link to let Discord embed it as a playable video
+                            media_text = f"\n\n🎥 **[Play/Download Media]({uploaded_url})**\n{uploaded_url}"
+                            if content_parts:
+                                content_parts[-1] += media_text
+                            else:
+                                content_parts.append(media_text)
+                        else:
+                            # External hosting failed, show fallback warning
+                            warning = f"\n\n*⚠️ [Media attachment omitted: size {file_size_bytes / (1024*1024):.1f}MB exceeds Discord's file size limit]*"
+                            if content_parts:
+                                content_parts[-1] += warning
+                            else:
+                                content_parts.append(warning)
+                        
+                        # Cleanup local file
+                        if os.path.exists(media_path):
+                            try:
+                                os.remove(media_path)
+                            except Exception:
+                                pass
+                        media_path = None
+                    has_media = False
                 else:
-                    content_parts.append(warning)
-                has_media = False
+                    warning = f"\n\n*⚠️ [Media attachment omitted: size {file_size_bytes / (1024*1024):.1f}MB exceeds Discord's file size limit]*"
+                    if content_parts:
+                        content_parts[-1] += warning
+                    else:
+                        content_parts.append(warning)
+                    has_media = False
             else:
                 temp_filename = f"media_{entity.id}_{message.id}"
                 media_path = await client.download_media(message, file=os.path.join(self.temp_dir, temp_filename))
