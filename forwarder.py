@@ -285,13 +285,14 @@ class DiscordForwarder:
                 logger.error(f"Catbox upload error: {e}")
         # PixelDrain (up to 3GB)
         elif file_size <= 3 * 1024 * 1024 * 1024:
-            url = "https://pixeldrain.com/api/file"
-            data = aiohttp.FormData()
+            import urllib.parse
+            filename = urllib.parse.quote(os.path.basename(file_path))
+            url = f"https://pixeldrain.com/api/file/{filename}"
             try:
                 with open(file_path, "rb") as f:
-                    data.add_field("file", f, filename=os.path.basename(file_path))
                     async with aiohttp.ClientSession() as session:
-                        async with session.post(url, data=data) as resp:
+                        # PUT request streams raw file bytes directly to prevent memory usage spikes
+                        async with session.put(url, data=f) as resp:
                             if resp.status in (200, 201):
                                 res_json = await resp.json()
                                 file_id = res_json.get("id")
