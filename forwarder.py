@@ -409,7 +409,10 @@ class DiscordForwarder:
                     
                     if uploaded_url:
                         logger.info(f"Using cached upload URL for media: {uploaded_url}")
-                        media_text = f"\n\n🎥 **[Play/Download Media]({uploaded_url})**\n{uploaded_url}"
+                        embed_url = uploaded_url
+                        if not any(uploaded_url.lower().endswith(e) for e in [".mp4", ".webm", ".mov", ".m4v"]):
+                            embed_url = f"{uploaded_url}?.mp4"
+                        media_text = f"\n\n🎥 **[Play/Download Media]({uploaded_url})**\n{embed_url}"
                         if content_parts:
                             content_parts[-1] += media_text
                         else:
@@ -429,7 +432,10 @@ class DiscordForwarder:
                             uploaded_url = await self.active_uploads[cache_key]
                             logger.info(f"Active upload finished. Reusing URL: {uploaded_url}")
                             if uploaded_url:
-                                media_text = f"\n\n🎥 **[Play/Download Media]({uploaded_url})**\n{uploaded_url}"
+                                embed_url = uploaded_url
+                                if not any(uploaded_url.lower().endswith(e) for e in [".mp4", ".webm", ".mov", ".m4v"]):
+                                    embed_url = f"{uploaded_url}?.mp4"
+                                media_text = f"\n\n🎥 **[Play/Download Media]({uploaded_url})**\n{embed_url}"
                                 if content_parts:
                                     content_parts[-1] += media_text
                                 else:
@@ -505,8 +511,11 @@ class DiscordForwarder:
                                     logger.info(f"Successfully uploaded media to external host: {uploaded_url}")
                                     self.media_upload_cache[cache_key] = uploaded_url
                                     fut.set_result(uploaded_url)
+                                    embed_url = uploaded_url
+                                    if not any(uploaded_url.lower().endswith(e) for e in [".mp4", ".webm", ".mov", ".m4v"]):
+                                        embed_url = f"{uploaded_url}?.mp4"
                                     # Append direct link to let Discord embed it as a playable video
-                                    media_text = f"\n\n🎥 **[Play/Download Media]({uploaded_url})**\n{uploaded_url}"
+                                    media_text = f"\n\n🎥 **[Play/Download Media]({uploaded_url})**\n{embed_url}"
                                     if content_parts:
                                         content_parts[-1] += media_text
                                     else:
