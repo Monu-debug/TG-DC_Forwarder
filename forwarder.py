@@ -286,13 +286,13 @@ class DiscordForwarder:
                 
         # Litterbox (200MB - 1GB)
         elif file_size <= 1024 * 1024 * 1024:
-            url = "https://litterbox.catbox.moe/resources/api.php"
+            url = "https://litterbox.catbox.moe/resources/internals/api.php"
             data = aiohttp.FormData()
             data.add_field("reqtype", "fileupload")
             data.add_field("time", "72h") # Keep file for 3 days
             try:
                 with open(file_path, "rb") as f:
-                    data.add_field("file", f, filename=os.path.basename(file_path))
+                    data.add_field("fileToUpload", f, filename=os.path.basename(file_path))
                     async with aiohttp.ClientSession() as session:
                         async with session.post(url, data=data) as resp:
                             if resp.status == 200:
