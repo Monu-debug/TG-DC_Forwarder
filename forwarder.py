@@ -3,8 +3,10 @@ import re
 import json
 import uuid
 import logging
+import asyncio
 import aiohttp
 from typing import Dict, Optional, Tuple, List
+
 
 logger = logging.getLogger("telegram_discord_forwarder")
 
