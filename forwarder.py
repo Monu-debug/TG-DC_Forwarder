@@ -284,49 +284,52 @@ class DiscordForwarder:
             except Exception as e:
                 logger.error(f"Catbox upload error: {e}")
                 
-        # Litterbox (200MB - 1GB)
-        elif file_size <= 1024 * 1024 * 1024:
-            url = "https://litterbox.catbox.moe/resources/internals/api.php"
-            data = aiohttp.FormData()
-            data.add_field("reqtype", "fileupload")
-            data.add_field("time", "72h") # Keep file for 3 days
-            try:
-                with open(file_path, "rb") as f:
-                    data.add_field("fileToUpload", f, filename=os.path.basename(file_path))
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post(url, data=data) as resp:
-                            if resp.status == 200:
-                                res_url = await resp.text()
-                                return res_url.strip()
-                            else:
-                                logger.error(f"Litterbox upload failed with status {resp.status}")
-            except Exception as e:
-                logger.error(f"Litterbox upload error: {e}")
-
-        # PixelDrain (1GB - 3GB)
+        # Prioritized PixelDrain upload for files > 200MB if API key is provided
         elif file_size <= 3 * 1024 * 1024 * 1024:
             url = "https://pixeldrain.com/api/file"
             api_key = os.environ.get("PIXELDRAIN_API_KEY") or self.settings.get("pixeldrain_api_key", "")
-            auth = aiohttp.BasicAuth(login="", password=api_key) if api_key else None
             
-            try:
-                async with aiohttp.ClientSession() as session:
-                    data = aiohttp.FormData()
+            if api_key:
+                auth = aiohttp.BasicAuth(login="", password=api_key)
+                try:
+                    logger.info("Attempting PixelDrain upload using API key...")
+                    async with aiohttp.ClientSession() as session:
+                        data = aiohttp.FormData()
+                        with open(file_path, "rb") as f:
+                            data.add_field("file", f, filename=os.path.basename(file_path))
+                            async with session.post(url, data=data, auth=auth) as resp:
+                                if resp.status in (200, 201):
+                                    res_json = await resp.json()
+                                    file_id = res_json.get("id")
+                                    if file_id:
+                                        return f"https://pixeldrain.com/api/file/{file_id}"
+                                else:
+                                    error_text = await resp.text()
+                                    logger.error(f"PixelDrain upload failed with status {resp.status}: {error_text}")
+                except Exception as e:
+                    logger.error(f"PixelDrain upload error: {e}")
+            else:
+                logger.info("No PixelDrain API key found. Checking fallback option...")
+
+            # Fallback to Litterbox for files up to 1GB if no key is present or if PixelDrain fails
+            if file_size <= 1024 * 1024 * 1024:
+                logger.info("Attempting Litterbox upload...")
+                fallback_url = "https://litterbox.catbox.moe/resources/internals/api.php"
+                data = aiohttp.FormData()
+                data.add_field("reqtype", "fileupload")
+                data.add_field("time", "72h") # Keep file for 3 days
+                try:
                     with open(file_path, "rb") as f:
-                        data.add_field("file", f, filename=os.path.basename(file_path))
-                        async with session.post(url, data=data, auth=auth) as resp:
-                            if resp.status in (200, 201):
-                                res_json = await resp.json()
-                                file_id = res_json.get("id")
-                                if file_id:
-                                    return f"https://pixeldrain.com/api/file/{file_id}"
-                            else:
-                                error_text = await resp.text()
-                                logger.error(f"PixelDrain upload failed with status {resp.status}: {error_text}")
-                                if resp.status == 401:
-                                    logger.error("Note: PixelDrain requires an API key for cloud uploads. Please set the PIXELDRAIN_API_KEY env var.")
-            except Exception as e:
-                logger.error(f"PixelDrain upload error: {e}")
+                        data.add_field("fileToUpload", f, filename=os.path.basename(file_path))
+                        async with aiohttp.ClientSession() as session:
+                            async with session.post(fallback_url, data=data) as resp:
+                                if resp.status == 200:
+                                    res_url = await resp.text()
+                                    return res_url.strip()
+                                else:
+                                    logger.error(f"Litterbox upload failed with status {resp.status}")
+                except Exception as e:
+                    logger.error(f"Litterbox upload error: {e}")
         return None
 
     async def forward_message(self, client, entity, message, webhook_key: str):
