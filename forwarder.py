@@ -32,6 +32,10 @@ class DiscordForwarder:
         
         # Load avatar cache
         self.avatar_cache = self._load_cache()
+        
+        # In-memory cache for large media uploads to prevent redundant uploads when using multiple webhooks
+        self.media_upload_cache = {}
+
 
     def _load_dynamic_config(self) -> dict:
         if os.path.exists(self.dynamic_config_file):
@@ -285,80 +289,94 @@ class DiscordForwarder:
                 # If file is within external hosting limits (3GB)
                 if use_external_hosting and file_size_bytes <= 3 * 1024 * 1024 * 1024:
                     size_mb = file_size_bytes / (1024 * 1024)
-                    logger.info(f"File size {size_mb:.1f}MB exceeds Discord limit. Downloading and uploading to external hosting...")
                     
-                    # 1. Post a temporary status message to Discord Webhook
-                    webhook_id, webhook_token = self._parse_webhook_url(webhook_url)
-                    status_msg_id = None
-                    if webhook_id and webhook_token:
-                        try:
-                            payload = {
-                                "username": username,
-                                "content": f"⏳ **Forwarding large media file** (`{size_mb:.1f}MB`)... (Uploading from Telegram to Cloud)"
-                            }
-                            if avatar_url:
-                                payload["avatar_url"] = avatar_url
-                            async with aiohttp.ClientSession() as session:
-                                async with session.post(f"{webhook_url}?wait=true", json=payload) as p_resp:
-                                    if p_resp.status in (200, 201):
-                                        p_data = await p_resp.json()
-                                        status_msg_id = p_data.get("id")
-                        except Exception as pe:
-                            logger.error(f"Failed to post status placeholder to Discord: {pe}")
-
-                    # 2. Download from Telegram with progress callback
-                    temp_filename = f"media_{entity.id}_{message.id}"
+                    # Check if this file has already been uploaded for this message
+                    cache_key = f"{entity.id}_{message.id}"
+                    uploaded_url = self.media_upload_cache.get(cache_key)
                     
-                    # Throttled progress callback to log every 10%
-                    last_percent = [-10]
-                    def progress_callback(current, total):
-                        percent = int((current / total) * 100) if total else 0
-                        if percent >= last_percent[0] + 10:
-                            last_percent[0] = percent
-                            logger.info(f"Telegram Download: {current / (1024*1024):.1f}MB / {total / (1024*1024):.1f}MB ({percent}%)")
-
-                    media_path = await client.download_media(
-                        message, 
-                        file=os.path.join(self.temp_dir, temp_filename),
-                        progress_callback=progress_callback
-                    )
-                    
-                    if media_path:
-                        uploaded_url = await self.upload_to_external_storage(media_path, file_size_bytes)
-                        if uploaded_url:
-                            logger.info(f"Successfully uploaded media to external host: {uploaded_url}")
-                            # Append direct link to let Discord embed it as a playable video
-                            media_text = f"\n\n🎥 **[Play/Download Media]({uploaded_url})**\n{uploaded_url}"
-                            if content_parts:
-                                content_parts[-1] += media_text
-                            else:
-                                content_parts.append(media_text)
+                    if uploaded_url:
+                        logger.info(f"Using cached upload URL for media: {uploaded_url}")
+                        media_text = f"\n\n🎥 **[Play/Download Media]({uploaded_url})**\n{uploaded_url}"
+                        if content_parts:
+                            content_parts[-1] += media_text
                         else:
-                            # External hosting failed, show fallback warning
-                            warning = f"\n\n*⚠️ [Media attachment omitted: size {size_mb:.1f}MB exceeds Discord's file size limit]*"
-                            if content_parts:
-                                content_parts[-1] += warning
-                            else:
-                                content_parts.append(warning)
-                        
-                        # Cleanup local file
-                        if os.path.exists(media_path):
-                            try:
-                                os.remove(media_path)
-                            except Exception:
-                                pass
-                        media_path = None
+                            content_parts.append(media_text)
                     else:
-                        has_media = False
+                        logger.info(f"File size {size_mb:.1f}MB exceeds Discord limit. Downloading and uploading to external hosting...")
+                        
+                        # 1. Post a temporary status message to Discord Webhook
+                        webhook_id, webhook_token = self._parse_webhook_url(webhook_url)
+                        status_msg_id = None
+                        if webhook_id and webhook_token:
+                            try:
+                                payload = {
+                                    "username": username,
+                                    "content": f"⏳ **Forwarding large media file** (`{size_mb:.1f}MB`)... (Uploading from Telegram to Cloud)"
+                                }
+                                if avatar_url:
+                                    payload["avatar_url"] = avatar_url
+                                async with aiohttp.ClientSession() as session:
+                                    async with session.post(f"{webhook_url}?wait=true", json=payload) as p_resp:
+                                        if p_resp.status in (200, 201):
+                                            p_data = await p_resp.json()
+                                            status_msg_id = p_data.get("id")
+                            except Exception as pe:
+                                logger.error(f"Failed to post status placeholder to Discord: {pe}")
 
-                    # 3. Delete the temporary status message from Discord Webhook
-                    if status_msg_id and webhook_id and webhook_token:
-                        try:
-                            async with aiohttp.ClientSession() as session:
-                                delete_url = f"https://discord.com/api/webhooks/{webhook_id}/{webhook_token}/messages/{status_msg_id}"
-                                await session.delete(delete_url)
-                        except Exception as de:
-                            logger.error(f"Failed to delete status placeholder from Discord: {de}")
+                        # 2. Download from Telegram with progress callback
+                        temp_filename = f"media_{entity.id}_{message.id}"
+                        
+                        # Throttled progress callback to log every 10%
+                        last_percent = [-10]
+                        def progress_callback(current, total):
+                            percent = int((current / total) * 100) if total else 0
+                            if percent >= last_percent[0] + 10:
+                                last_percent[0] = percent
+                                logger.info(f"Telegram Download: {current / (1024*1024):.1f}MB / {total / (1024*1024):.1f}MB ({percent}%)")
+
+                        media_path = await client.download_media(
+                            message, 
+                            file=os.path.join(self.temp_dir, temp_filename),
+                            progress_callback=progress_callback
+                        )
+                        
+                        if media_path:
+                            uploaded_url = await self.upload_to_external_storage(media_path, file_size_bytes)
+                            if uploaded_url:
+                                logger.info(f"Successfully uploaded media to external host: {uploaded_url}")
+                                self.media_upload_cache[cache_key] = uploaded_url
+                                # Append direct link to let Discord embed it as a playable video
+                                media_text = f"\n\n🎥 **[Play/Download Media]({uploaded_url})**\n{uploaded_url}"
+                                if content_parts:
+                                    content_parts[-1] += media_text
+                                else:
+                                    content_parts.append(media_text)
+                            else:
+                                # External hosting failed, show fallback warning
+                                warning = f"\n\n*⚠️ [Media attachment omitted: size {size_mb:.1f}MB exceeds Discord's file size limit]*"
+                                if content_parts:
+                                    content_parts[-1] += warning
+                                else:
+                                    content_parts.append(warning)
+                            
+                            # Cleanup local file
+                            if os.path.exists(media_path):
+                                try:
+                                    os.remove(media_path)
+                                except Exception:
+                                    pass
+                            media_path = None
+                        else:
+                            has_media = False
+
+                        # 3. Delete the temporary status message from Discord Webhook
+                        if status_msg_id and webhook_id and webhook_token:
+                            try:
+                                async with aiohttp.ClientSession() as session:
+                                    delete_url = f"https://discord.com/api/webhooks/{webhook_id}/{webhook_token}/messages/{status_msg_id}"
+                                    await session.delete(delete_url)
+                            except Exception as de:
+                                logger.error(f"Failed to delete status placeholder from Discord: {de}")
                     
                     has_media = False
                 else:
