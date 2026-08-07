@@ -365,6 +365,12 @@ class DiscordForwarder:
         use_external_hosting = self.settings.get("use_external_hosting", True)
 
         if has_media:
+            ext = ""
+            if message.file and message.file.name:
+                _, ext = os.path.splitext(message.file.name)
+            target_ext = ".mp4" if ext.lower() == ".mkv" else (ext or ".mp4")
+            temp_filename = f"media_{entity.id}_{message.id}{target_ext}"
+
             file_size_bytes = message.file.size if message.file else 0
             max_bytes = self.settings.get("download_max_size_mb", 25) * 1024 * 1024
             
@@ -459,7 +465,6 @@ class DiscordForwarder:
                             logger.info(f"File size {size_mb:.1f}MB exceeds Discord limit. Downloading and uploading to external hosting...")
                             
                             # 2. Download from Telegram with progress callback
-                            temp_filename = f"media_{entity.id}_{message.id}"
                             
                             # Throttled progress callback to log every 10% and update Discord in real-time
                             last_percent = [-10]
@@ -550,7 +555,6 @@ class DiscordForwarder:
                         content_parts.append(warning)
                     has_media = False
             else:
-                temp_filename = f"media_{entity.id}_{message.id}"
                 media_path = await client.download_media(message, file=os.path.join(self.temp_dir, temp_filename))
                 if media_path:
                     file_name = os.path.basename(media_path)
