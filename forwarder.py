@@ -35,9 +35,9 @@ class DiscordForwarder:
         # Load avatar cache
         self.avatar_cache = self._load_cache()
         
-        # In-memory cache for large media uploads to prevent redundant uploads when using multiple webhooks
         self.media_upload_cache = {}
         self.active_uploads = {}
+        self.active_status_messages = {}
 
 
 
@@ -344,12 +344,36 @@ class DiscordForwarder:
             max_bytes = self.settings.get("download_max_size_mb", 25) * 1024 * 1024
             
             if file_size_bytes > max_bytes:
-                # If file is within external hosting limits (3GB)
                 if use_external_hosting and file_size_bytes <= 3 * 1024 * 1024 * 1024:
                     size_mb = file_size_bytes / (1024 * 1024)
-                    
-                    # Check if this file has already been uploaded for this message
                     cache_key = f"{entity.id}_{message.id}"
+                    
+                    # 1. Post a temporary status message to Discord Webhook for this specific task
+                    webhook_id, webhook_token = self._parse_webhook_url(webhook_url)
+                    status_msg_id = None
+                    if webhook_id and webhook_token:
+                        try:
+                            payload = {
+                                "username": username,
+                                "content": f"⏳ **Forwarding large media file** (`{size_mb:.1f}MB`)... (Queued/Downloading)"
+                            }
+                            if avatar_url:
+                                payload["avatar_url"] = avatar_url
+                            async with aiohttp.ClientSession() as session:
+                                async with session.post(f"{webhook_url}?wait=true", json=payload) as p_resp:
+                                    if p_resp.status in (200, 201):
+                                        p_data = await p_resp.json()
+                                        status_msg_id = p_data.get("id")
+                        except Exception as pe:
+                            logger.error(f"Failed to post status placeholder to Discord: {pe}")
+
+                    # Register this status message for real-time progress updates
+                    status_info = (webhook_id, webhook_token, status_msg_id)
+                    if cache_key not in self.active_status_messages:
+                        self.active_status_messages[cache_key] = []
+                    if status_msg_id:
+                        self.active_status_messages[cache_key].append(status_info)
+                        
                     uploaded_url = self.media_upload_cache.get(cache_key)
                     
                     if uploaded_url:
@@ -359,6 +383,15 @@ class DiscordForwarder:
                             content_parts[-1] += media_text
                         else:
                             content_parts.append(media_text)
+                            
+                        # Delete the status placeholder for this task since it's already done
+                        if status_msg_id and webhook_id and webhook_token:
+                            try:
+                                async with aiohttp.ClientSession() as session:
+                                    delete_url = f"https://discord.com/api/webhooks/{webhook_id}/{webhook_token}/messages/{status_msg_id}"
+                                    await session.delete(delete_url)
+                            except Exception as de:
+                                logger.error(f"Failed to delete status placeholder from Discord: {de}")
                     elif cache_key in self.active_uploads:
                         logger.info("Media is currently being uploaded by another task. Waiting for it to complete...")
                         try:
@@ -383,6 +416,15 @@ class DiscordForwarder:
                                 content_parts[-1] += warning
                             else:
                                 content_parts.append(warning)
+                        finally:
+                            # Delete the status placeholder for this task since we finished waiting
+                            if status_msg_id and webhook_id and webhook_token:
+                                try:
+                                    async with aiohttp.ClientSession() as session:
+                                        delete_url = f"https://discord.com/api/webhooks/{webhook_id}/{webhook_token}/messages/{status_msg_id}"
+                                        await session.delete(delete_url)
+                                except Exception as de:
+                                    logger.error(f"Failed to delete status placeholder from Discord: {de}")
                     else:
                         # This task is the primary uploader
                         fut = asyncio.get_running_loop().create_future()
@@ -391,25 +433,6 @@ class DiscordForwarder:
                         try:
                             logger.info(f"File size {size_mb:.1f}MB exceeds Discord limit. Downloading and uploading to external hosting...")
                             
-                            # 1. Post a temporary status message to Discord Webhook
-                            webhook_id, webhook_token = self._parse_webhook_url(webhook_url)
-                            status_msg_id = None
-                            if webhook_id and webhook_token:
-                                try:
-                                    payload = {
-                                        "username": username,
-                                        "content": f"⏳ **Forwarding large media file** (`{size_mb:.1f}MB`)... (Uploading from Telegram to Cloud)"
-                                    }
-                                    if avatar_url:
-                                        payload["avatar_url"] = avatar_url
-                                    async with aiohttp.ClientSession() as session:
-                                        async with session.post(f"{webhook_url}?wait=true", json=payload) as p_resp:
-                                            if p_resp.status in (200, 201):
-                                                p_data = await p_resp.json()
-                                                status_msg_id = p_data.get("id")
-                                except Exception as pe:
-                                    logger.error(f"Failed to post status placeholder to Discord: {pe}")
-
                             # 2. Download from Telegram with progress callback
                             temp_filename = f"media_{entity.id}_{message.id}"
                             
@@ -421,20 +444,22 @@ class DiscordForwarder:
                                     last_percent[0] = percent
                                     logger.info(f"Telegram Download: {current / (1024*1024):.1f}MB / {total / (1024*1024):.1f}MB ({percent}%)")
                                     
-                                    # Update Discord placeholder message in real-time (non-blocking)
-                                    if status_msg_id and webhook_id and webhook_token:
-                                        async def update_discord_status():
-                                            try:
-                                                edit_url = f"https://discord.com/api/webhooks/{webhook_id}/{webhook_token}/messages/{status_msg_id}"
-                                                payload = {
-                                                    "content": f"⏳ **Forwarding large media file** (`{size_mb:.1f}MB`)... Progress: **{percent}%**"
-                                                }
-                                                async with aiohttp.ClientSession() as session:
-                                                    await session.patch(edit_url, json=payload)
-                                            except Exception as de:
-                                                logger.error(f"Failed to edit status progress on Discord: {de}")
-                                                
-                                        asyncio.create_task(update_discord_status())
+                                    # Update all active Discord placeholder messages in real-time
+                                    status_list = self.active_status_messages.get(cache_key, [])
+                                    for wid, wtok, mid in status_list:
+                                        if mid:
+                                            async def update_discord_status(w_id, w_tok, m_id):
+                                                try:
+                                                    edit_url = f"https://discord.com/api/webhooks/{w_id}/{w_tok}/messages/{m_id}"
+                                                    payload = {
+                                                        "content": f"⏳ **Forwarding large media file** (`{size_mb:.1f}MB`)... Progress: **{percent}%**"
+                                                    }
+                                                    async with aiohttp.ClientSession() as session:
+                                                        await session.patch(edit_url, json=payload)
+                                                except Exception as de:
+                                                    logger.error(f"Failed to edit status progress on Discord: {de}")
+                                                    
+                                            asyncio.create_task(update_discord_status(wid, wtok, mid))
 
 
                             media_path = await self._download_media_robust(
@@ -476,7 +501,7 @@ class DiscordForwarder:
                                 fut.set_result(None)
                                 has_media = False
 
-                            # 3. Delete the temporary status message from Discord Webhook
+                            # 3. Delete the temporary status message from Discord Webhook for the primary uploader
                             if status_msg_id and webhook_id and webhook_token:
                                 try:
                                     async with aiohttp.ClientSession() as session:
@@ -489,6 +514,7 @@ class DiscordForwarder:
                             raise exc
                         finally:
                             self.active_uploads.pop(cache_key, None)
+                            self.active_status_messages.pop(cache_key, None)
                     
                     has_media = False
                 else:
