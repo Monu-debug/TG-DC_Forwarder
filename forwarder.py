@@ -302,7 +302,7 @@ class DiscordForwarder:
                                     res_json = await resp.json()
                                     file_id = res_json.get("id")
                                     if file_id:
-                                        return f"https://pixeldrain.com/api/file/{file_id}"
+                                        return f"https://pixeldrain.com/u/{file_id}"
                                 else:
                                     error_text = await resp.text()
                                     logger.error(f"PixelDrain upload failed with status {resp.status}: {error_text}")
