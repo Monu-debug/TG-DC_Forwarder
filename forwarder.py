@@ -285,14 +285,13 @@ class DiscordForwarder:
                 logger.error(f"Catbox upload error: {e}")
         # PixelDrain (up to 3GB)
         elif file_size <= 3 * 1024 * 1024 * 1024:
-            import urllib.parse
-            filename = urllib.parse.quote(os.path.basename(file_path))
-            url = f"https://pixeldrain.com/api/file/{filename}"
+            url = "https://pixeldrain.com/api/file"
             try:
-                with open(file_path, "rb") as f:
-                    async with aiohttp.ClientSession() as session:
-                        # PUT request streams raw file bytes directly to prevent memory usage spikes
-                        async with session.put(url, data=f) as resp:
+                async with aiohttp.ClientSession() as session:
+                    data = aiohttp.FormData()
+                    with open(file_path, "rb") as f:
+                        data.add_field("file", f, filename=os.path.basename(file_path))
+                        async with session.post(url, data=data) as resp:
                             if resp.status in (200, 201):
                                 res_json = await resp.json()
                                 file_id = res_json.get("id")
@@ -414,13 +413,29 @@ class DiscordForwarder:
                             # 2. Download from Telegram with progress callback
                             temp_filename = f"media_{entity.id}_{message.id}"
                             
-                            # Throttled progress callback to log every 10%
+                            # Throttled progress callback to log every 10% and update Discord in real-time
                             last_percent = [-10]
                             def progress_callback(current, total):
                                 percent = int((current / total) * 100) if total else 0
                                 if percent >= last_percent[0] + 10:
                                     last_percent[0] = percent
                                     logger.info(f"Telegram Download: {current / (1024*1024):.1f}MB / {total / (1024*1024):.1f}MB ({percent}%)")
+                                    
+                                    # Update Discord placeholder message in real-time (non-blocking)
+                                    if status_msg_id and webhook_id and webhook_token:
+                                        async def update_discord_status():
+                                            try:
+                                                edit_url = f"https://discord.com/api/webhooks/{webhook_id}/{webhook_token}/messages/{status_msg_id}"
+                                                payload = {
+                                                    "content": f"⏳ **Forwarding large media file** (`{size_mb:.1f}MB`)... Progress: **{percent}%**"
+                                                }
+                                                async with aiohttp.ClientSession() as session:
+                                                    await session.patch(edit_url, json=payload)
+                                            except Exception as de:
+                                                logger.error(f"Failed to edit status progress on Discord: {de}")
+                                                
+                                        asyncio.create_task(update_discord_status())
+
 
                             media_path = await self._download_media_robust(
                                 client,
