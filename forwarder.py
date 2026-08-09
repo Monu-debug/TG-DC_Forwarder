@@ -263,6 +263,28 @@ class DiscordForwarder:
                             pass
                     return None
 
+    async def _remux_to_mp4(self, input_path: str, output_path: str) -> bool:
+        """Remuxes an MKV file to MP4 container using FFmpeg without re-encoding."""
+        try:
+            cmd = ["ffmpeg", "-y", "-i", input_path, "-c", "copy", output_path]
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            if process.returncode == 0:
+                logger.info("Successfully remuxed MKV to MP4 using FFmpeg.")
+                return True
+            else:
+                logger.error(f"FFmpeg remux failed with code {process.returncode}: {stderr.decode(errors='ignore')}")
+                return False
+        except FileNotFoundError:
+            logger.warning("FFmpeg not found in system PATH. Cannot remux container.")
+            return False
+        except Exception as e:
+            logger.error(f"FFmpeg remux error: {e}")
+            return False
 
     async def upload_to_external_storage(self, file_path: str, file_size: int) -> Optional[str]:
         """Uploads file to Catbox (<=200MB), Litterbox (200MB - 1GB) or PixelDrain (1GB - 3GB) to bypass Discord upload limits."""
@@ -366,13 +388,14 @@ class DiscordForwarder:
         file_name = None
         has_media = message.media is not None and self.settings.get("forward_media", True)
         use_external_hosting = self.settings.get("use_external_hosting", True)
-
         if has_media:
             ext = ""
             if message.file and message.file.name:
                 _, ext = os.path.splitext(message.file.name)
-            target_ext = ".mp4" if ext.lower() == ".mkv" else (ext or ".mp4")
-            temp_filename = f"media_{entity.id}_{message.id}{target_ext}"
+            if not ext:
+                ext = ".mp4"
+            temp_filename = f"media_{entity.id}_{message.id}{ext}"
+
 
             file_size_bytes = message.file.size if message.file else 0
             max_bytes = self.settings.get("download_max_size_mb", 25) * 1024 * 1024
@@ -509,6 +532,31 @@ class DiscordForwarder:
                             )
                             
                             if media_path:
+                                # Convert MKV to MP4 if needed to enable native Discord player embeds
+                                _, current_ext = os.path.splitext(media_path)
+                                if current_ext.lower() == ".mkv":
+                                    mp4_path = os.path.splitext(media_path)[0] + ".mp4"
+                                    logger.info("Detected MKV container. Attempting to remux to MP4 using FFmpeg...")
+                                    if await self._remux_to_mp4(media_path, mp4_path):
+                                        try:
+                                            os.remove(media_path)
+                                        except Exception:
+                                            pass
+                                        media_path = mp4_path
+                                    else:
+                                        logger.info("FFmpeg remux failed or not found. Falling back to simple rename.")
+                                        try:
+                                            os.rename(media_path, mp4_path)
+                                            media_path = mp4_path
+                                        except Exception as re:
+                                            logger.error(f"Failed to rename file: {re}")
+                                
+                                # Update file size bytes in case of container changes
+                                try:
+                                    file_size_bytes = os.path.getsize(media_path)
+                                except Exception:
+                                    pass
+
                                 uploaded_url = await self.upload_to_external_storage(media_path, file_size_bytes)
                                 if uploaded_url:
                                     logger.info(f"Successfully uploaded media to external host: {uploaded_url}")
@@ -569,6 +617,25 @@ class DiscordForwarder:
             else:
                 media_path = await client.download_media(message, file=os.path.join(self.temp_dir, temp_filename))
                 if media_path:
+                    # Convert MKV to MP4 if needed to enable native Discord player embeds
+                    _, current_ext = os.path.splitext(media_path)
+                    if current_ext.lower() == ".mkv":
+                        mp4_path = os.path.splitext(media_path)[0] + ".mp4"
+                        logger.info("Detected MKV container for direct upload. Attempting to remux to MP4 using FFmpeg...")
+                        if await self._remux_to_mp4(media_path, mp4_path):
+                            try:
+                                os.remove(media_path)
+                            except Exception:
+                                pass
+                            media_path = mp4_path
+                        else:
+                            logger.info("FFmpeg remux failed or not found. Falling back to simple rename.")
+                            try:
+                                os.rename(media_path, mp4_path)
+                                media_path = mp4_path
+                            except Exception as re:
+                                logger.error(f"Failed to rename file: {re}")
+                    
                     file_name = os.path.basename(media_path)
                 else:
                     has_media = False
