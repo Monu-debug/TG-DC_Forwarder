@@ -388,9 +388,9 @@ def get_bot_manager():
 # Retrieve manager instance
 manager = get_bot_manager()
 
-# Auto-start bot on page load if session already exists (ensures 24/7 boot on container restarts)
+# Auto-start bot on page load if session already exists or if we can recreate it from environment variables
 if manager.status == "Stopped":
-    session_exists = os.path.exists("telegram_forwarder_session.session")
+    session_exists = os.path.exists("telegram_forwarder_session.session") or "TELEGRAM_SESSION_BASE64" in os.environ
     has_config = os.path.exists("config.yaml") or (len(st.secrets) > 0 and "telegram" in st.secrets)
     if session_exists and has_config:
         manager.start_bot()
@@ -792,9 +792,18 @@ with col1:
                 st.error("Please enter your 2FA password.")
 
     st.subheader("📝 Mapped Configurations")
-    if os.path.exists("config.yaml") or (len(st.secrets) > 0 and "telegram" in st.secrets):
+    has_secrets = False
+    try:
+        if len(st.secrets) > 0 and "telegram" in st.secrets:
+            has_secrets = True
+    except Exception:
+        pass
+
+    if os.path.exists("config.yaml") or has_secrets:
         try:
-            config = st.secrets.to_dict() if (len(st.secrets) > 0 and "telegram" in st.secrets) else None
+            config = None
+            if has_secrets:
+                config = st.secrets.to_dict()
             if not config:
                 with open("config.yaml", "r", encoding="utf-8") as f:
                     config = yaml.safe_load(f)
@@ -810,7 +819,7 @@ with col1:
         except Exception as e:
             st.error(f"Error loading settings view: {e}")
     else:
-        st.error("Configuration file/secrets missing.")
+        st.error("Configuration file missing.")
 
 with col2:
     st.header("📋 Activity Log")
