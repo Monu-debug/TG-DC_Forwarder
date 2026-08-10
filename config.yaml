@@ -1,0 +1,52 @@
+# Telegram API Credentials
+# Get these from https://my.telegram.org (under API Development Tools)
+telegram:
+  api_id: 20861184
+  api_hash: "90455d0cdedfe6bb16bd716e2438703b"
+  phone: "+917499224791"
+
+# Discord Bot Credentials (Left blank for Webhook-only mode)
+discord:
+  bot_token: ""
+
+# Discord Webhook Configurations (Multiple Active Webhooks)
+discord_webhooks:
+  default: "https://discord.com/api/webhooks/1523620955815940106/8H2i2Dbew4yTW-LEBToFXG6RmZziGmsxyA63Ggqz0vQJIzldC1IZU8tFYdI1cxxKnQk-"
+  third: "https://discord.com/api/webhooks/1536359521138769952/BV4-MVMjUEndNTfoqDMzNiPCYuP9VnShsNS5r9qBtDrPGS4CRnAPDBqU4s48lqCHnIXy"
+
+# Channel Mappings (Mapping all 6 channels to default and third webhooks)
+mappings:
+  - telegram_channel: "-1003827118873"
+    webhook_key: "default"
+  - telegram_channel: "-1003827118873"
+    webhook_key: "third"
+  - telegram_channel: "-1001533565122"
+    webhook_key: "default"
+  - telegram_channel: "-1001533565122"
+    webhook_key: "third"
+  - telegram_channel: "-1004370364835"
+    webhook_key: "default"
+  - telegram_channel: "-1004370364835"
+    webhook_key: "third"
+  - telegram_channel: "-1003980169037"
+    webhook_key: "default"
+  - telegram_channel: "-1003980169037"
+    webhook_key: "third"
+  - telegram_channel: "-1001748820600"
+    webhook_key: "default"
+  - telegram_channel: "-1001748820600"
+    webhook_key: "third"
+  - telegram_channel: "-1003904963386"
+    webhook_key: "default"
+  - telegram_channel: "-1003904963386"
+    webhook_key: "third"
+
+# General Forwarder Settings
+settings:
+  forward_media: true
+  download_max_size_mb: 25
+  temp_dir: "./temp"
+  use_telegram_profile: true
+  use_external_hosting: true
+  pixeldrain_api_key: "ae332ff0-0fe2-487d-8a6a-b6df011ff5db"
+
