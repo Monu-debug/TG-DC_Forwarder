@@ -269,24 +269,15 @@ class DiscordForwarder:
             else:
                 media_path = await client.download_media(message, file=os.path.join(self.temp_dir, temp_filename))
                 if media_path:
-                    # Convert MKV to MP4 if needed to enable native Discord player embeds
+                    # Rename .mkv to .mp4 just in case to trick Discord client player
                     _, current_ext = os.path.splitext(media_path)
                     if current_ext.lower() == ".mkv":
                         mp4_path = os.path.splitext(media_path)[0] + ".mp4"
-                        logger.info("Detected MKV container for direct upload. Attempting to remux to MP4 using FFmpeg...")
-                        if await self._remux_to_mp4(media_path, mp4_path):
-                            try:
-                                os.remove(media_path)
-                            except Exception:
-                                pass
+                        try:
+                            os.rename(media_path, mp4_path)
                             media_path = mp4_path
-                        else:
-                            logger.info("FFmpeg remux failed or not found. Falling back to simple rename.")
-                            try:
-                                os.rename(media_path, mp4_path)
-                                media_path = mp4_path
-                            except Exception as re:
-                                logger.error(f"Failed to rename file: {re}")
+                        except Exception as re:
+                            logger.error(f"Failed to rename file: {re}")
                     
                     file_name = os.path.basename(media_path)
                 else:
