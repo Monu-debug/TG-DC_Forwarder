@@ -244,7 +244,7 @@ class DiscordForwarder:
 
         media_path = None
         file_name = None
-        has_media = message.media is not None and self.settings.get("forward_media", True)
+        has_media = message.media is not None and message.file is not None and self.settings.get("forward_media", True)
         use_external_hosting = self.settings.get("use_external_hosting", True)
         if has_media:
             ext = ""
@@ -288,7 +288,6 @@ class DiscordForwarder:
             try:
                 for i, part in enumerate(content_parts):
                     is_last_chunk = (i == len(content_parts) - 1)
-                    data = aiohttp.FormData()
                     
                     payload = {
                         "username": username
@@ -301,17 +300,22 @@ class DiscordForwarder:
                     elif not has_media:
                         payload["content"] = "[Empty message]"
 
-                    data.add_field("payload_json", json.dumps(payload))
-
                     opened_file = None
                     if is_last_chunk and has_media and media_path and os.path.exists(media_path):
+                        data = aiohttp.FormData()
+                        data.add_field("payload_json", json.dumps(payload))
                         opened_file = open(media_path, "rb")
                         data.add_field("file", opened_file, filename=file_name)
-
-                    async with session.post(webhook_url, data=data) as resp:
-                        if resp.status not in (200, 204):
-                            error_text = await resp.text()
-                            logger.error(f"Failed webhook forward. Status: {resp.status}, Response: {error_text}")
+                        
+                        async with session.post(webhook_url, data=data) as resp:
+                            if resp.status not in (200, 204):
+                                error_text = await resp.text()
+                                logger.error(f"Failed webhook forward (media). Status: {resp.status}, Response: {error_text}")
+                    else:
+                        async with session.post(webhook_url, json=payload) as resp:
+                            if resp.status not in (200, 204):
+                                error_text = await resp.text()
+                                logger.error(f"Failed webhook forward (text). Status: {resp.status}, Response: {error_text}")
                     
                     if opened_file:
                         opened_file.close()
