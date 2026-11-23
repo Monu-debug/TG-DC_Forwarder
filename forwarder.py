@@ -28,30 +28,55 @@ class DiscordForwarder:
         self.webhooks = dict(config.get("discord_webhooks", {}))
         
         # Override or populate webhooks from Environment Variables (keeps secrets off GitHub!)
+        # 1. Match explicit prefix DISCORD_WEBHOOK_<KEY>
         for env_k, env_v in os.environ.items():
+            val = env_v.strip()
+            if not val:
+                continue
             if env_k.startswith("DISCORD_WEBHOOK_"):
                 key = env_k[len("DISCORD_WEBHOOK_"):].lower()
-                val = env_v.strip()
-                if val:
-                    self.webhooks[key] = val
-                    logger.info(f"Loaded webhook '{key}' from environment variable ({val[:35]}***)")
+                self.webhooks[key] = val
+                logger.info(f"Loaded webhook '{key}' from environment variable ({val[:35]}***)")
             elif env_k == "DISCORD_WEBHOOK_URL":
-                val = env_v.strip()
-                if val:
-                    self.webhooks["default"] = val
-                    logger.info(f"Loaded default webhook from DISCORD_WEBHOOK_URL ({val[:35]}***)")
+                self.webhooks["default"] = val
+                logger.info(f"Loaded default webhook from DISCORD_WEBHOOK_URL ({val[:35]}***)")
 
-        # Aliases so any common naming works seamlessly
-        if "first" in self.webhooks and not self.webhooks.get("default"):
-            self.webhooks["default"] = self.webhooks["first"]
-        if "1" in self.webhooks and not self.webhooks.get("default"):
-            self.webhooks["default"] = self.webhooks["1"]
+        # 2. Also auto-discover ANY environment variable containing a discord webhook url
+        found_discord_urls = []
+        for env_k, env_v in os.environ.items():
+            val = env_v.strip()
+            if "discord.com/api/webhooks/" in val and val not in found_discord_urls:
+                found_discord_urls.append(val)
 
-        if "second" in self.webhooks and not self.webhooks.get("third"):
-            self.webhooks["third"] = self.webhooks["second"]
-        if "2" in self.webhooks and not self.webhooks.get("third"):
-            self.webhooks["third"] = self.webhooks["2"]
-        if "third" in self.webhooks and not self.webhooks.get("second"):
+        # If default is not set but we found URLs, set default to the first one
+        if not self.webhooks.get("default") and len(found_discord_urls) > 0:
+            self.webhooks["default"] = found_discord_urls[0]
+
+        # Common aliases for default
+        for alias in ["1", "first", "one", "default"]:
+            if self.webhooks.get(alias) and not self.webhooks.get("default"):
+                self.webhooks["default"] = self.webhooks[alias]
+
+        # Common aliases for third
+        for alias in ["3rd", "third", "second", "2nd", "2", "3", "channel2", "chan2", "two", "three", "another"]:
+            if self.webhooks.get(alias) and not self.webhooks.get("third"):
+                self.webhooks["third"] = self.webhooks[alias]
+
+        # Fallback: If "third" is still empty, check if any other key in self.webhooks has a valid url
+        if not self.webhooks.get("third"):
+            for k, v in self.webhooks.items():
+                if k != "default" and v and v.startswith("http") and v != self.webhooks.get("default"):
+                    self.webhooks["third"] = v
+                    break
+
+        # Fallback 2: Check if found_discord_urls has another url
+        if not self.webhooks.get("third"):
+            for url in found_discord_urls:
+                if url != self.webhooks.get("default"):
+                    self.webhooks["third"] = url
+                    break
+
+        if self.webhooks.get("third") and not self.webhooks.get("second"):
             self.webhooks["second"] = self.webhooks["third"]
 
         self.mappings = list(config.get("mappings", []))
@@ -240,10 +265,13 @@ class DiscordForwarder:
 
 
 
-    async def forward_message(self, client, entity, message, webhook_key: str):
+    async def forward_message(self, client, entity, message, webhook_key: str, log_callback=None):
         webhook_url = self.webhooks.get(webhook_key)
         if not webhook_url:
-            logger.error(f"No webhook URL found for key '{webhook_key}'")
+            msg = f"⚠️ No webhook URL configured for key '{webhook_key}'"
+            logger.error(msg)
+            if log_callback:
+                log_callback(msg, logging.WARNING)
             return
 
         username = entity.title if hasattr(entity, 'title') else "Telegram Channel"
@@ -343,7 +371,13 @@ class DiscordForwarder:
                         async with session.post(webhook_url, json=payload) as resp:
                             if resp.status not in (200, 204):
                                 error_text = await resp.text()
-                                logger.error(f"Failed webhook forward (text). Status: {resp.status}, Response: {error_text}")
+                                err_msg = f"❌ Failed webhook forward to '{webhook_key}'. Status: {resp.status}, Response: {error_text}"
+                                logger.error(err_msg)
+                                if log_callback:
+                                    log_callback(err_msg, logging.ERROR)
+                            else:
+                                if log_callback and is_last_chunk:
+                                    log_callback(f"✅ Forwarded to '{webhook_key}' webhook ({username})")
                     
                     if opened_file:
                         opened_file.close()

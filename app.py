@@ -341,7 +341,7 @@ class BotManager:
             
             entity, webhook_keys = mapped_item
             self.log(f"Detected new message in '{entity.title}'. Forwarding to {len(webhook_keys)} webhooks...")
-            tasks = [self.forwarder.forward_message(self.client, entity, event.message, key) for key in webhook_keys]
+            tasks = [self.forwarder.forward_message(self.client, entity, event.message, key, log_callback=self.log) for key in webhook_keys]
             await asyncio.gather(*tasks)
 
 
@@ -811,6 +811,12 @@ with col1:
             st.write("**Telegram Phone:**", config.get("telegram", {}).get("phone", "N/A"))
             st.write("**Discord Bot:**", "Configured ✅" if config.get("discord", {}).get("bot_token") else "Not Configured ❌")
             
+            if manager.forwarder:
+                st.write("**Discord Webhooks:**")
+                for w_key in ["default", "third"]:
+                    has_url = bool(manager.forwarder.webhooks.get(w_key))
+                    st.write(f"- `{w_key}`: {'Connected ✅' if has_url else 'Not Set / Missing ❌'}")
+
             st.write(f"**Active Subscriptions ({len(manager.channel_to_webhook)}):**")
             for ch_id, (entity, webhook_keys) in manager.channel_to_webhook.items():
                 title = getattr(entity, 'title', f"ID: {ch_id}")
