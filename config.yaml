@@ -9,10 +9,11 @@ telegram:
 discord:
   bot_token: ""
 
-# Discord Webhook Configurations (Multiple Active Webhooks)
+# Discord Webhook Configurations (Set these privately in Render Environment Variables!)
+# e.g., in Render dashboard: DISCORD_WEBHOOK_DEFAULT and DISCORD_WEBHOOK_THIRD
 discord_webhooks:
-  default: "https://discord.com/api/webhooks/1523620955815940106/8H2i2Dbew4yTW-LEBToFXG6RmZziGmsxyA63Ggqz0vQJIzldC1IZU8tFYdI1cxxKnQk-"
-  third: "https://discord.com/api/webhooks/1536359521138769952/BV4-MVMjUEndNTfoqDMzNiPCYuP9VnShsNS5r9qBtDrPGS4CRnAPDBqU4s48lqCHnIXy"
+  default: ""
+  third: ""
 
 # Channel Mappings (Mapping all 6 channels to default and third webhooks)
 mappings:

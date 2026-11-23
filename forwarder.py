@@ -26,6 +26,21 @@ class DiscordForwarder:
         
         # Initialize active webhooks and mappings
         self.webhooks = dict(config.get("discord_webhooks", {}))
+        
+        # Override or populate webhooks from Environment Variables (keeps secrets off GitHub!)
+        for env_k, env_v in os.environ.items():
+            if env_k.startswith("DISCORD_WEBHOOK_"):
+                key = env_k[len("DISCORD_WEBHOOK_"):].lower()
+                val = env_v.strip()
+                if val:
+                    self.webhooks[key] = val
+                    logger.info(f"Loaded webhook '{key}' from environment variable ({val[:35]}***)")
+            elif env_k == "DISCORD_WEBHOOK_URL":
+                val = env_v.strip()
+                if val:
+                    self.webhooks["default"] = val
+                    logger.info(f"Loaded default webhook from DISCORD_WEBHOOK_URL ({val[:35]}***)")
+
         self.mappings = list(config.get("mappings", []))
         
         # Load dynamic configurations
