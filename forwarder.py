@@ -36,10 +36,12 @@ class DiscordForwarder:
             if env_k.startswith("DISCORD_WEBHOOK_"):
                 key = env_k[len("DISCORD_WEBHOOK_"):].lower()
                 self.webhooks[key] = val
-                logger.info(f"Loaded webhook '{key}' from environment variable ({val[:35]}***)")
+                w_id, _ = self._parse_webhook_url(val)
+                logger.info(f"Loaded webhook '{key}' from environment variable '{env_k}' (ID: {w_id})")
             elif env_k == "DISCORD_WEBHOOK_URL":
                 self.webhooks["default"] = val
-                logger.info(f"Loaded default webhook from DISCORD_WEBHOOK_URL ({val[:35]}***)")
+                w_id, _ = self._parse_webhook_url(val)
+                logger.info(f"Loaded default webhook from DISCORD_WEBHOOK_URL (ID: {w_id})")
 
         # 2. Also auto-discover ANY environment variable containing a discord webhook url
         found_discord_urls = []
@@ -395,7 +397,8 @@ class DiscordForwarder:
                         async with session.post(webhook_url, json=payload) as resp:
                             if resp.status not in (200, 204):
                                 error_text = await resp.text()
-                                err_msg = f"❌ Failed webhook forward to '{webhook_key}'. Status: {resp.status}, Response: {error_text}"
+                                w_id, _ = self._parse_webhook_url(webhook_url)
+                                err_msg = f"❌ Failed webhook forward to '{webhook_key}' (Webhook ID: {w_id}). Status: {resp.status}, Response: {error_text}"
                                 logger.error(err_msg)
                                 if log_callback:
                                     log_callback(err_msg, logging.ERROR)

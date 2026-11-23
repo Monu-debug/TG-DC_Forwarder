@@ -813,9 +813,13 @@ with col1:
             
             if manager.forwarder:
                 st.write("**Discord Webhooks:**")
-                for w_key in ["default", "third"]:
-                    has_url = bool(manager.forwarder.get_webhook_url(w_key))
-                    st.write(f"- `{w_key}`: {'Connected ✅' if has_url else 'Not Set / Missing ❌'}")
+                for w_key in ["default", "third", "second"]:
+                    w_url = manager.forwarder.get_webhook_url(w_key)
+                    if w_url:
+                        w_id, _ = manager.forwarder._parse_webhook_url(w_url)
+                        st.write(f"- `{w_key}`: Connected ✅ (ID: `{w_id}`)")
+                    else:
+                        st.write(f"- `{w_key}`: Not Set / Missing ❌")
 
             st.write(f"**Active Subscriptions ({len(manager.channel_to_webhook)}):**")
             for ch_id, (entity, webhook_keys) in manager.channel_to_webhook.items():
