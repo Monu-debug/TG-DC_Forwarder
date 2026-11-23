@@ -10,6 +10,9 @@ from typing import Dict, Optional, Tuple, List
 
 logger = logging.getLogger("telegram_discord_forwarder")
 
+# Known revoked/deleted webhook IDs that should be permanently dropped if found in cached configs
+REVOKED_WEBHOOK_IDS = {"1523620955815940106", "1536359521138769952"}
+
 class DiscordForwarder:
     def __init__(self, config: dict):
         self.config = config
@@ -24,14 +27,38 @@ class DiscordForwarder:
         # Ensure temp directory exists
         os.makedirs(self.temp_dir, exist_ok=True)
         
-        # Initialize active webhooks and mappings
+        # Initialize active webhooks and mappings from config
         self.webhooks = dict(config.get("discord_webhooks", {}))
+        self.mappings = list(config.get("mappings", []))
         
-        # Override or populate webhooks from Environment Variables (keeps secrets off GitHub!)
+        # Load dynamic configurations first
+        self.dynamic_config = self._load_dynamic_config()
+        self._merge_dynamic_config()
+        
+        # Apply Environment Variables (Environment variables ALWAYS take precedence over disk/config!)
+        self._apply_environment_variables()
+        
+        # Load avatar cache
+        self.avatar_cache = self._load_cache()
+        
+        self.media_upload_cache = {}
+        self.active_uploads = {}
+        self.active_status_messages = {}
+
+    def _is_revoked(self, url: str) -> bool:
+        if not url:
+            return True
+        for rev_id in REVOKED_WEBHOOK_IDS:
+            if rev_id in str(url):
+                return True
+        return False
+
+    def _apply_environment_variables(self):
+        """Overrides/populates webhooks from Environment Variables with highest priority."""
         # 1. Match explicit prefix DISCORD_WEBHOOK_<KEY>
         for env_k, env_v in os.environ.items():
             val = env_v.strip()
-            if not val:
+            if not val or self._is_revoked(val):
                 continue
             if env_k.startswith("DISCORD_WEBHOOK_"):
                 key = env_k[len("DISCORD_WEBHOOK_"):].lower()
@@ -48,7 +75,7 @@ class DiscordForwarder:
         for env_k, env_v in os.environ.items():
             matches = re.findall(r"https://discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]+", str(env_v))
             for u in matches:
-                if u not in found_discord_urls:
+                if u not in found_discord_urls and not self._is_revoked(u):
                     found_discord_urls.append(u)
 
         # If default is not set but we found URLs, set default to the first one
@@ -57,45 +84,39 @@ class DiscordForwarder:
 
         # Common aliases for default
         for alias in ["1", "first", "one", "default"]:
-            if self.webhooks.get(alias) and not self.webhooks.get("default"):
-                self.webhooks["default"] = self.webhooks[alias]
+            cand = self.webhooks.get(alias)
+            if cand and not self._is_revoked(cand) and not self.webhooks.get("default"):
+                self.webhooks["default"] = cand
 
-        # Common aliases for third
+        # Common aliases for third/second
         for alias in ["3rd", "third", "second", "2nd", "2", "3", "channel2", "chan2", "two", "three", "another"]:
-            if self.webhooks.get(alias) and not self.webhooks.get("third"):
-                self.webhooks["third"] = self.webhooks[alias]
+            cand = self.webhooks.get(alias)
+            if cand and not self._is_revoked(cand):
+                if not self.webhooks.get("third"):
+                    self.webhooks["third"] = cand
+                if not self.webhooks.get("second"):
+                    self.webhooks["second"] = cand
 
-        # Fallback: If "third" is still empty, check if any other key in self.webhooks has a valid url
-        if not self.webhooks.get("third"):
+        # Fallback: If "third" or "second" is still empty, check any other valid webhook in self.webhooks
+        if not self.webhooks.get("third") or self._is_revoked(self.webhooks.get("third")):
             for k, v in self.webhooks.items():
-                if k != "default" and v and v.startswith("http") and v != self.webhooks.get("default"):
+                if k != "default" and v and v.startswith("http") and not self._is_revoked(v) and v != self.webhooks.get("default"):
                     self.webhooks["third"] = v
+                    self.webhooks["second"] = v
                     break
 
         # Fallback 2: Check if found_discord_urls has another url
-        if not self.webhooks.get("third"):
+        if not self.webhooks.get("third") or self._is_revoked(self.webhooks.get("third")):
             for url in found_discord_urls:
-                if url != self.webhooks.get("default"):
+                if url != self.webhooks.get("default") and not self._is_revoked(url):
                     self.webhooks["third"] = url
+                    self.webhooks["second"] = url
                     break
 
         if self.webhooks.get("third") and not self.webhooks.get("second"):
             self.webhooks["second"] = self.webhooks["third"]
-
-        self.mappings = list(config.get("mappings", []))
-        
-        # Load dynamic configurations
-        self.dynamic_config = self._load_dynamic_config()
-        self._merge_dynamic_config()
-        
-        # Load avatar cache
-        self.avatar_cache = self._load_cache()
-        
-        self.media_upload_cache = {}
-        self.active_uploads = {}
-        self.active_status_messages = {}
-
-
+        if self.webhooks.get("second") and not self.webhooks.get("third"):
+            self.webhooks["third"] = self.webhooks["second"]
 
     def _load_dynamic_config(self) -> dict:
         if os.path.exists(self.dynamic_config_file):
@@ -114,9 +135,19 @@ class DiscordForwarder:
             logger.error(f"Error saving dynamic mappings: {e}")
 
     def _merge_dynamic_config(self):
-        # Merge webhooks
+        cleaned = False
+        clean_webhooks = {}
         for key, url in self.dynamic_config.get("discord_webhooks", {}).items():
-            self.webhooks[key] = url
+            if self._is_revoked(url):
+                logger.warning(f"Purging dead/revoked webhook '{key}' from dynamic config: {url}")
+                cleaned = True
+            else:
+                clean_webhooks[key] = url
+                self.webhooks[key] = url
+        self.dynamic_config["discord_webhooks"] = clean_webhooks
+
+        if cleaned:
+            self._save_dynamic_config()
         
         # Merge mappings (avoid duplicates)
         base_channels = {str(m.get("telegram_channel")) for m in self.mappings}
@@ -271,21 +302,23 @@ class DiscordForwarder:
     def get_webhook_url(self, webhook_key: str) -> Optional[str]:
         """Resolves webhook URL with intelligent fallback across all environment variable names."""
         url = self.webhooks.get(webhook_key)
-        if url:
+        if url and not self._is_revoked(url):
             return url
         # If looking for third/second/2/3
         if webhook_key in ("third", "3rd", "second", "2nd", "2", "3"):
             for alt in ("third", "3rd", "second", "2nd", "2", "3", "channel2"):
-                if self.webhooks.get(alt):
-                    return self.webhooks[alt]
+                cand = self.webhooks.get(alt)
+                if cand and not self._is_revoked(cand):
+                    return cand
             for k, u in self.webhooks.items():
-                if k != "default" and u and str(u).startswith("http"):
+                if k != "default" and u and str(u).startswith("http") and not self._is_revoked(u):
                     return u
         # If looking for default
         if webhook_key in ("default", "first", "1", "1st"):
             for alt in ("default", "first", "1", "1st"):
-                if self.webhooks.get(alt):
-                    return self.webhooks[alt]
+                cand = self.webhooks.get(alt)
+                if cand and not self._is_revoked(cand):
+                    return cand
         return None
 
     async def forward_message(self, client, entity, message, webhook_key: str, log_callback=None):
