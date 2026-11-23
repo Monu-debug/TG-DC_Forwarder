@@ -41,6 +41,19 @@ class DiscordForwarder:
                     self.webhooks["default"] = val
                     logger.info(f"Loaded default webhook from DISCORD_WEBHOOK_URL ({val[:35]}***)")
 
+        # Aliases so any common naming works seamlessly
+        if "first" in self.webhooks and not self.webhooks.get("default"):
+            self.webhooks["default"] = self.webhooks["first"]
+        if "1" in self.webhooks and not self.webhooks.get("default"):
+            self.webhooks["default"] = self.webhooks["1"]
+
+        if "second" in self.webhooks and not self.webhooks.get("third"):
+            self.webhooks["third"] = self.webhooks["second"]
+        if "2" in self.webhooks and not self.webhooks.get("third"):
+            self.webhooks["third"] = self.webhooks["2"]
+        if "third" in self.webhooks and not self.webhooks.get("second"):
+            self.webhooks["second"] = self.webhooks["third"]
+
         self.mappings = list(config.get("mappings", []))
         
         # Load dynamic configurations
