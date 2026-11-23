@@ -814,7 +814,7 @@ with col1:
             if manager.forwarder:
                 st.write("**Discord Webhooks:**")
                 for w_key in ["default", "third"]:
-                    has_url = bool(manager.forwarder.webhooks.get(w_key))
+                    has_url = bool(manager.forwarder.get_webhook_url(w_key))
                     st.write(f"- `{w_key}`: {'Connected ✅' if has_url else 'Not Set / Missing ❌'}")
 
             st.write(f"**Active Subscriptions ({len(manager.channel_to_webhook)}):**")

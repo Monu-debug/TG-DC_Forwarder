@@ -44,9 +44,10 @@ class DiscordForwarder:
         # 2. Also auto-discover ANY environment variable containing a discord webhook url
         found_discord_urls = []
         for env_k, env_v in os.environ.items():
-            val = env_v.strip()
-            if "discord.com/api/webhooks/" in val and val not in found_discord_urls:
-                found_discord_urls.append(val)
+            matches = re.findall(r"https://discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]+", str(env_v))
+            for u in matches:
+                if u not in found_discord_urls:
+                    found_discord_urls.append(u)
 
         # If default is not set but we found URLs, set default to the first one
         if not self.webhooks.get("default") and len(found_discord_urls) > 0:
@@ -265,8 +266,28 @@ class DiscordForwarder:
 
 
 
+    def get_webhook_url(self, webhook_key: str) -> Optional[str]:
+        """Resolves webhook URL with intelligent fallback across all environment variable names."""
+        url = self.webhooks.get(webhook_key)
+        if url:
+            return url
+        # If looking for third/second/2/3
+        if webhook_key in ("third", "3rd", "second", "2nd", "2", "3"):
+            for alt in ("third", "3rd", "second", "2nd", "2", "3", "channel2"):
+                if self.webhooks.get(alt):
+                    return self.webhooks[alt]
+            for k, u in self.webhooks.items():
+                if k != "default" and u and str(u).startswith("http"):
+                    return u
+        # If looking for default
+        if webhook_key in ("default", "first", "1", "1st"):
+            for alt in ("default", "first", "1", "1st"):
+                if self.webhooks.get(alt):
+                    return self.webhooks[alt]
+        return None
+
     async def forward_message(self, client, entity, message, webhook_key: str, log_callback=None):
-        webhook_url = self.webhooks.get(webhook_key)
+        webhook_url = self.get_webhook_url(webhook_key)
         if not webhook_url:
             msg = f"⚠️ No webhook URL configured for key '{webhook_key}'"
             logger.error(msg)
@@ -298,6 +319,9 @@ class DiscordForwarder:
             if content:
                 content_parts.append(content)
 
+        if not content_parts:
+            content_parts = [""]
+
         media_path = None
         file_name = None
         has_media = message.media is not None and message.file is not None and self.settings.get("forward_media", True)
@@ -308,7 +332,7 @@ class DiscordForwarder:
                 _, ext = os.path.splitext(message.file.name)
             if not ext:
                 ext = ".mp4"
-            temp_filename = f"media_{entity.id}_{message.id}{ext}"
+            temp_filename = f"media_{entity.id}_{message.id}_{webhook_key}{ext}"
 
 
             file_size_bytes = message.file.size if message.file else 0
